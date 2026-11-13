@@ -41,6 +41,7 @@ jobs:
           import io
           import lzma
           import pathlib
+          import plistlib
           import struct
           import tarfile
 
@@ -76,14 +77,18 @@ jobs:
           missing = sorted(required - names)
           if missing:
               raise SystemExit(f"missing payload files: {missing}")
-          import re
           plist_name = (
               "Library/MobileSubstrate/DynamicLibraries/"
               "podsgrantadaptivetransparency.plist"
           )
           with tarfile.open(fileobj=io.BytesIO(data)) as archive:
-              plist_data = archive.extractfile(plist_name).read().decode("utf-8")
-          if not re.search(r'heard', plist_data):
+              plist_data = archive.extractfile(plist_name).read()
+          try:
+              plist = plistlib.loads(plist_data)
+          except Exception as error:
+              raise SystemExit(f"cannot parse child tweak filter: {error}")
+          executables = plist.get("Filter", {}).get("Executables", [])
+          if "heard" not in executables:
               raise SystemExit("child tweak filter does not include heard")
           forbidden = sorted(name for name in names if name.startswith("var/jb/"))
           if forbidden:
