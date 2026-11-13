@@ -26,47 +26,19 @@
 - (unsigned int)productId;
 @end
 
-static BluetoothDevice *AAPDeviceForAddress(NSString *address) {
-        Class managerClass = objc_getClass("BluetoothManager");
-        if (!managerClass) {
-                dlopen("/System/Library/PrivateFrameworks/BluetoothManager.framework/BluetoothManager",
-                        RTLD_LAZY);
-                managerClass = objc_getClass("BluetoothManager");
-        }
-        SEL sharedSelector = NSSelectorFromString(@"sharedInstance");
-        if (!managerClass || ![managerClass respondsToSelector:sharedSelector]) {
-                return nil;
-        }
-        id manager = [(id)managerClass sharedInstance];
-        SEL devicesSelector = NSSelectorFromString(@"pairedDevices");
-        if (![manager respondsToSelector:devicesSelector]) {
-                devicesSelector = NSSelectorFromString(@"connectedDevices");
-        }
-        if (![manager respondsToSelector:devicesSelector]) {
-                return nil;
-        }
-        id devices = ((id (*)(id, SEL))objc_msgSend)(manager, devicesSelector);
-        if (![devices isKindOfClass:[NSArray class]]) {
-                return nil;
-        }
-        for (BluetoothDevice *device in devices) {
-                if (![device respondsToSelector:@selector(address)]) {
-                        continue;
-                }
-                NSString *candidate = [device address];
-                if ([candidate caseInsensitiveCompare:address] == NSOrderedSame) {
-                        return device;
-                }
-        }
-        return nil;
-}
-
 @interface BTSDeviceClassic : NSObject
 - (BluetoothDevice *)device;
 @end
 
 @interface BTSDeviceConfigController : UIViewController
 @end
+
+static NSString *const AAPAdaptivePreferencesPath =
+	@"/var/mobile/Library/Preferences/com.lns.pogr.adaptive.plist";
+static NSString *const AAPSystemHearingProtectionKey =
+	@"activeHearingProtectionEnabled";
+static NSString *const AAPAdaptiveCharacteristicUUID =
+	@"a48fec08-3921-43db-82aa-afbce8ebb4fb";
 
 static NSString *AAPNormalizedAddress(NSString *address) {
 	if (![address isKindOfClass:[NSString class]]) {
@@ -78,8 +50,26 @@ static NSString *AAPNormalizedAddress(NSString *address) {
 	return normalized.length ? normalized : nil;
 }
 
-static NSString *const AAPAdaptivePreferencesPath =
-	@"/var/mobile/Library/Preferences/com.lns.pogr.adaptive.plist";
+static NSArray<NSString *> *AAPPreferenceKeys(NSString *address) {
+	NSString *normalized = AAPNormalizedAddress(address);
+	if (!normalized.length) {
+		return @[];
+	}
+
+	NSMutableArray<NSString *> *keys =
+		[NSMutableArray arrayWithObject:normalized];
+	NSString *compact = [[normalized
+		stringByReplacingOccurrencesOfString:@"-" withString:@""]
+		stringByReplacingOccurrencesOfString:@":" withString:@""];
+	NSString *legacy = [NSString stringWithFormat:@"adaptive:%@",
+		compact.uppercaseString];
+	for (NSString *key in @[normalized.uppercaseString, legacy]) {
+		if (key.length && ![keys containsObject:key]) {
+			[keys addObject:key];
+		}
+	}
+	return keys;
+}
 
 static NSDictionary *AAPReadAdaptivePreferences(void) {
 	NSDictionary *values = [NSDictionary dictionaryWithContentsOfFile:
@@ -100,25 +90,6 @@ static BOOL AAPWriteAdaptivePreferences(NSDictionary *values) {
 	return written;
 }
 
-static NSArray<NSString *> *AAPPreferenceKeys(NSString *address) {
-	NSString *normalized = AAPNormalizedAddress(address);
-	if (!normalized.length) {
-		return @[];
-	}
-	NSMutableArray<NSString *> *keys = [NSMutableArray arrayWithObject:normalized];
-	NSString *compact = [[normalized
-		stringByReplacingOccurrencesOfString:@"-" withString:@""]
-		stringByReplacingOccurrencesOfString:@":" withString:@""];
-	NSString *legacy = [NSString stringWithFormat:@"adaptive:%@",
-		compact.uppercaseString];
-	for (NSString *key in @[normalized.uppercaseString, legacy]) {
-		if (key.length && ![keys containsObject:key]) {
-			[keys addObject:key];
-		}
-	}
-	return keys;
-}
-
 static BOOL AAPValueForAddress(NSDictionary *values, NSString *address) {
 	if (![values isKindOfClass:[NSDictionary class]]) {
 		return NO;
@@ -132,11 +103,7 @@ static BOOL AAPValueForAddress(NSDictionary *values, NSString *address) {
 	return NO;
 }
 
-static BOOL AAPAdaptiveEnabledForAddress(NSString *address) {
-	return AAPValueForAddress(AAPReadAdaptivePreferences(), address);
-}
-
-static BOOL AAPSetAdaptiveEnabledForAddress(NSString *address, BOOL enabled) {
+static BOOL AAPStoreAdaptivePreference(NSString *address, BOOL enabled) {
 	NSMutableDictionary *values = [AAPReadAdaptivePreferences() mutableCopy];
 	if (!values) {
 		values = [NSMutableDictionary dictionary];
@@ -145,6 +112,176 @@ static BOOL AAPSetAdaptiveEnabledForAddress(NSString *address, BOOL enabled) {
 		values[key] = @(enabled);
 	}
 	return AAPWriteAdaptivePreferences(values);
+}
+
+static id AAPSharedPASettings(void) {
+	Class settingsClass = objc_getClass("PASettings");
+	if (!settingsClass) {
+		dlopen("/System/Library/PrivateFrameworks/Preferences.framework/Preferences",
+			RTLD_LAZY);
+		settingsClass = objc_getClass("PASettings");
+	}
+	if (!settingsClass) {
+		return nil;
+	}
+
+	SEL sharedSelector = NSSelectorFromString(@"sharedInstance");
+	if (![settingsClass respondsToSelector:sharedSelector]) {
+		return nil;
+	}
+	return ((id (*)(id, SEL))objc_msgSend)((id)settingsClass,
+		sharedSelector);
+}
+
+static id AAPPreferenceValueForKey(id settings, NSString *key) {
+	if (!settings || !key.length) {
+		return nil;
+	}
+	SEL getter = @selector(objectValueForKey:withClass:andDefaultValue:);
+	if (![settings respondsToSelector:getter]) {
+		return nil;
+	}
+	return ((id (*)(id, SEL, NSString *, Class, id))objc_msgSend)(
+		settings,
+		getter,
+		key,
+		[NSDictionary class],
+		nil);
+}
+
+static BOOL AAPReadSystemHearingProtection(NSString *address,
+	BOOL *found) {
+	if (found) {
+		*found = NO;
+	}
+
+	id settings = AAPSharedPASettings();
+	id value = AAPPreferenceValueForKey(settings,
+		AAPSystemHearingProtectionKey);
+	if (![value isKindOfClass:[NSDictionary class]]) {
+		return NO;
+	}
+
+	for (NSString *key in AAPPreferenceKeys(address)) {
+		id candidate = ((NSDictionary *)value)[key];
+		if ([candidate isKindOfClass:[NSNumber class]]) {
+			if (found) {
+				*found = YES;
+			}
+			return [candidate boolValue];
+		}
+	}
+	return NO;
+}
+
+static BOOL AAPAdaptiveEnabledForAddress(NSString *address) {
+	BOOL found = NO;
+	BOOL enabled = AAPReadSystemHearingProtection(address, &found);
+	if (found) {
+		return enabled;
+	}
+	return AAPValueForAddress(AAPReadAdaptivePreferences(), address);
+}
+
+static BOOL AAPWriteSystemHearingProtection(id settings,
+	NSString *address,
+	BOOL enabled,
+	BOOL notifyHeard) {
+	if (!settings || !address.length) {
+		return NO;
+	}
+
+	SEL setter = @selector(setValue:forPreferenceKey:);
+	if (![settings respondsToSelector:setter]) {
+		AAPAdaptiveLog(@"PASettings setValue:forPreferenceKey: unavailable");
+		return NO;
+	}
+
+	id current = AAPPreferenceValueForKey(settings,
+		AAPSystemHearingProtectionKey);
+	NSMutableDictionary *values =
+		[current isKindOfClass:[NSDictionary class]]
+		? [current mutableCopy]
+		: [NSMutableDictionary dictionary];
+	values[address] = @(enabled);
+	((void (*)(id, SEL, id, NSString *))objc_msgSend)(settings,
+		setter,
+		values,
+		AAPSystemHearingProtectionKey);
+	AAPAdaptiveLog(@"system preference address=%@ enabled=%d",
+		address,
+		enabled);
+
+	if (!notifyHeard) {
+		return YES;
+	}
+
+	SEL customizedGetter =
+		NSSelectorFromString(@"transparencyCustomizedForAddress:");
+	SEL customizedSetter =
+		NSSelectorFromString(@"setTransparencyCustomized:forAddress:");
+	if ([settings respondsToSelector:customizedGetter] &&
+		[settings respondsToSelector:customizedSetter]) {
+		BOOL customized =
+			((BOOL (*)(id, SEL, NSString *))objc_msgSend)(settings,
+				customizedGetter,
+				address);
+		((void (*)(id, SEL, BOOL, NSString *))objc_msgSend)(settings,
+			customizedSetter,
+			customized,
+			address);
+		AAPAdaptiveLog(@"heard refresh address=%@ customized=%d",
+			address,
+			customized);
+	} else {
+		AAPAdaptiveLog(@"transparencyCustomized selectors unavailable");
+	}
+	return YES;
+}
+
+static BOOL AAPPASettingsAdaptiveEnabled(id self, SEL _cmd,
+	NSString *address) {
+	(void)self;
+	(void)_cmd;
+	return AAPAdaptiveEnabledForAddress(address);
+}
+
+static void AAPPASettingsSetAdaptiveEnabled(id self, SEL _cmd,
+	BOOL enabled,
+	NSString *address) {
+	(void)_cmd;
+	NSString *normalized = AAPNormalizedAddress(address);
+	if (!normalized.length) {
+		return;
+	}
+	AAPStoreAdaptivePreference(normalized, enabled);
+	AAPWriteSystemHearingProtection(self, normalized, enabled, YES);
+}
+
+static void AAPInstallPASettingsMethods(void) {
+	Class settingsClass = objc_getClass("PASettings");
+	if (!settingsClass) {
+		dlopen("/System/Library/PrivateFrameworks/Preferences.framework/Preferences",
+			RTLD_LAZY);
+		settingsClass = objc_getClass("PASettings");
+	}
+	if (!settingsClass) {
+		AAPAdaptiveLog(@"PASettings unavailable; adaptive plist fallback active");
+		return;
+	}
+
+	class_addMethod(settingsClass,
+		NSSelectorFromString(@"adaptiveTransparencyEnabledForAddress:"),
+		(IMP)AAPPASettingsAdaptiveEnabled,
+		"B@:@");
+	class_addMethod(settingsClass,
+		NSSelectorFromString(@"setAdaptiveTransparencyEnabled:forAddress:"),
+		(IMP)AAPPASettingsSetAdaptiveEnabled,
+		"v@:B@");
+	class_addMethod(settingsClass,
+		NSSelectorFromString(@"_setAdaptiveTransparencyEnabled:forAddress:"),
+		(IMP)AAPPASettingsSetAdaptiveEnabled,
+		"v@:B@");
 }
 
 static BOOL AAPProductSupported(unsigned int productId) {
@@ -165,8 +302,12 @@ static id AAPRawBluetoothDevice(BTSDeviceConfigController *controller) {
 	if (!controller) {
 		return nil;
 	}
-	Ivar deviceIvar = class_getInstanceVariable(object_getClass(controller),
-		"_device");
+	Class controllerClass = object_getClass(controller);
+	Ivar deviceIvar = class_getInstanceVariable(controllerClass, "_device");
+	while (!deviceIvar && controllerClass) {
+		controllerClass = class_getSuperclass(controllerClass);
+		deviceIvar = class_getInstanceVariable(controllerClass, "_device");
+	}
 	if (!deviceIvar) {
 		return nil;
 	}
@@ -181,9 +322,68 @@ static BluetoothDevice *AAPBluetoothDevice(
 		return nil;
 	}
 	if ([rawDevice respondsToSelector:@selector(device)]) {
-		return [rawDevice device];
+		return ((BTSDeviceClassic *)rawDevice).device;
 	}
 	return rawDevice;
+}
+
+static BluetoothDevice *AAPDeviceForAddress(NSString *address) {
+	Class managerClass = objc_getClass("BluetoothManager");
+	if (!managerClass) {
+		dlopen("/System/Library/PrivateFrameworks/BluetoothManager.framework/BluetoothManager",
+			RTLD_LAZY);
+		managerClass = objc_getClass("BluetoothManager");
+	}
+	SEL sharedSelector = NSSelectorFromString(@"sharedInstance");
+	if (!managerClass ||
+		![managerClass respondsToSelector:sharedSelector]) {
+		return nil;
+	}
+	id manager = ((id (*)(id, SEL))objc_msgSend)((id)managerClass,
+		sharedSelector);
+	SEL devicesSelector = NSSelectorFromString(@"pairedDevices");
+	if (![manager respondsToSelector:devicesSelector]) {
+		devicesSelector = NSSelectorFromString(@"connectedDevices");
+	}
+	if (![manager respondsToSelector:devicesSelector]) {
+		return nil;
+	}
+	id devices = ((id (*)(id, SEL))objc_msgSend)(manager,
+		devicesSelector);
+	if (![devices isKindOfClass:[NSArray class]]) {
+		return nil;
+	}
+
+	for (BluetoothDevice *device in devices) {
+		if (![device respondsToSelector:@selector(address)]) {
+			continue;
+		}
+		NSString *candidate = device.address;
+		if ([candidate caseInsensitiveCompare:address] == NSOrderedSame) {
+			return device;
+		}
+	}
+	return nil;
+}
+
+static void AAPKickstartHearing(void) {
+	static id accessibilityController;
+	dispatch_async(dispatch_get_main_queue(), ^{
+		if (accessibilityController) {
+			return;
+		}
+		NSBundle *bundle = [NSBundle bundleWithPath:
+			@"/System/Library/PreferenceBundles/AccessibilitySettings.bundle"];
+		[bundle load];
+		Class controllerClass =
+			[bundle classNamed:@"AccessibilitySettingsController"];
+		if (controllerClass) {
+			accessibilityController = [controllerClass new];
+			AAPAdaptiveLog(@"AccessibilitySettingsController created");
+		} else {
+			AAPAdaptiveLog(@"AccessibilitySettingsController unavailable");
+		}
+	});
 }
 
 static void AAPSetSwitchOn(UISwitch *toggle, BOOL on) {
@@ -196,69 +396,6 @@ static void AAPSetSwitchOn(UISwitch *toggle, BOOL on) {
 	});
 }
 
-static BOOL AAPPASettingsAdaptiveEnabled(id self, SEL _cmd, NSString *address) {
-	(void)self;
-	(void)_cmd;
-	return AAPAdaptiveEnabledForAddress(address);
-}
-
-static void AAPPASettingsSetAdaptiveEnabled(id self,
-	SEL _cmd,
-	BOOL enabled,
-	NSString *address) {
-	(void)_cmd;
-	AAPSetAdaptiveEnabledForAddress(address, enabled);
-
-	/*
-	 * Re-apply the existing transparency preference after the plist write.
-	 * This is the IPC nudge used by PodsGrant 0.5.4 and keeps `heard`
-	 * scheduling its native accessory update.
-	 */
-	SEL getter = NSSelectorFromString(@"transparencyCustomizedForAddress:");
-	SEL setter = NSSelectorFromString(@"setTransparencyCustomized:forAddress:");
-	if (![self respondsToSelector:getter] ||
-		![self respondsToSelector:setter]) {
-		AAPAdaptiveLog(@"transparencyCustomized selectors unavailable");
-		return;
-	}
-
-	BOOL customized = ((BOOL (*)(id, SEL, NSString *))objc_msgSend)(
-		self,
-		getter,
-		address);
-	((void (*)(id, SEL, BOOL, NSString *))objc_msgSend)(
-		self,
-		setter,
-		customized,
-		address);
-	AAPAdaptiveLog(@"transparencyCustomized refresh address=%@ value=%d",
-		address,
-		customized);
-}
-
-static void AAPPASettingsApplyRuntimeMethods(void) {
-	Class settingsClass = objc_getClass("PASettings");
-	if (!settingsClass) {
-		AAPAdaptiveLog(@"PASettings unavailable; using adaptive plist only");
-		return;
-	}
-
-	class_addMethod(settingsClass,
-		NSSelectorFromString(@"adaptiveTransparencyEnabledForAddress:"),
-		(IMP)AAPPASettingsAdaptiveEnabled,
-		"B@:@");
-	class_addMethod(settingsClass,
-		NSSelectorFromString(@"_setAdaptiveTransparencyEnabled:forAddress:"),
-		(IMP)AAPPASettingsSetAdaptiveEnabled,
-		"v@:B@");
-	class_addMethod(settingsClass,
-		NSSelectorFromString(@"setAdaptiveTransparencyEnabled:forAddress:"),
-		(IMP)AAPPASettingsSetAdaptiveEnabled,
-		"v@:B@");
-}
-
-%group PAAccessoryHooks
-
 static NSMutableSet<NSString *> *AAPDiscoveryRequests(void) {
 	static NSMutableSet<NSString *> *requests;
 	static dispatch_once_t onceToken;
@@ -269,8 +406,8 @@ static NSMutableSet<NSString *> *AAPDiscoveryRequests(void) {
 }
 
 static CBCharacteristic *AAPAdaptiveCharacteristic(CBPeripheral *peripheral) {
-	CBUUID *adaptiveUUID = [CBUUID
-		UUIDWithString:@"a48fec08-3921-43db-82aa-afbce8ebb4fb"];
+	CBUUID *adaptiveUUID =
+		[CBUUID UUIDWithString:AAPAdaptiveCharacteristicUUID];
 	for (CBService *service in peripheral.services) {
 		for (CBCharacteristic *characteristic in service.characteristics) {
 			if ([characteristic.UUID isEqual:adaptiveUUID]) {
@@ -288,12 +425,13 @@ static void AAPWriteAdaptiveCharacteristic(CBPeripheral *peripheral,
 	if (!peripheral || !characteristic) {
 		return;
 	}
+
 	uint8_t value = enabled ? 1 : 0;
 	CBCharacteristicProperties properties = characteristic.properties;
 	CBCharacteristicWriteType writeType =
-		(properties & CBCharacteristicPropertyWrite)
-		? CBCharacteristicWriteWithResponse
-		: CBCharacteristicWriteWithoutResponse;
+		(properties & CBCharacteristicPropertyWriteWithoutResponse)
+		? CBCharacteristicWriteWithoutResponse
+		: CBCharacteristicWriteWithResponse;
 	[peripheral
 		writeValue:[NSData dataWithBytes:&value length:1]
 		forCharacteristic:characteristic
@@ -303,6 +441,23 @@ static void AAPWriteAdaptiveCharacteristic(CBPeripheral *peripheral,
 		enabled,
 		(unsigned long)properties,
 		(long)writeType);
+}
+
+static void AAPWriteCharacteristicIfAvailable(CBPeripheral *peripheral,
+	NSString *address) {
+	CBCharacteristic *characteristic =
+		AAPAdaptiveCharacteristic(peripheral);
+	if (!characteristic) {
+		AAPAdaptiveLog(@"adaptive BLE characteristic missing address=%@ services=%lu",
+			address,
+			(unsigned long)peripheral.services.count);
+		return;
+	}
+	BOOL enabled = AAPAdaptiveEnabledForAddress(address);
+	AAPWriteAdaptiveCharacteristic(peripheral,
+		characteristic,
+		enabled,
+		address);
 }
 
 static void AAPRequestCharacteristicDiscovery(CBPeripheral *peripheral,
@@ -316,19 +471,15 @@ static void AAPRequestCharacteristicDiscovery(CBPeripheral *peripheral,
 		return;
 	}
 	[requests addObject:key];
-	AAPAdaptiveLog(@"adaptive BLE discovery requested address=%@", address);
+	AAPAdaptiveLog(@"adaptive BLE discovery requested address=%@",
+		address);
 	[peripheral discoverServices:nil];
 
 	dispatch_after(dispatch_time(DISPATCH_TIME_NOW, NSEC_PER_SEC),
 		dispatch_get_main_queue(), ^{
 			[requests removeObject:key];
-			CBCharacteristic *characteristic =
-				AAPAdaptiveCharacteristic(peripheral);
-			if (characteristic) {
-				AAPWriteAdaptiveCharacteristic(peripheral,
-					characteristic,
-					AAPAdaptiveEnabledForAddress(address),
-					address);
+			if (AAPAdaptiveCharacteristic(peripheral)) {
+				AAPWriteCharacteristicIfAvailable(peripheral, address);
 				return;
 			}
 			for (CBService *service in peripheral.services) {
@@ -340,76 +491,59 @@ static void AAPRequestCharacteristicDiscovery(CBPeripheral *peripheral,
 		});
 }
 
-/*
- * Preferences only stores the value. `heard` owns the connected
- * CBPeripheral, so the native adaptive-transparency characteristic must be
- * written in that process.
- */
+%group PAAccessoryHooks
+
 %hook PAAccessoryManager
 
 - (void)sendUpdateToAccessory {
 	%orig;
 	NSDictionary *uuidToAddress = [self uuidToAddress];
-
 	for (CBPeripheral *peripheral in [self peripherals]) {
 		if (peripheral.state != CBPeripheralStateConnected) {
 			continue;
 		}
-		NSString *address = uuidToAddress[[peripheral.identifier UUIDString]];
-		if (![address isKindOfClass:[NSString class]] || !address.length) {
+		NSString *address =
+			uuidToAddress[peripheral.identifier.UUIDString ?: @""];
+		if (![address isKindOfClass:[NSString class]] ||
+			!address.length) {
 			continue;
 		}
-		BOOL enabled = AAPAdaptiveEnabledForAddress(address);
-		CBCharacteristic *characteristic =
-			AAPAdaptiveCharacteristic(peripheral);
-		if (characteristic) {
-			AAPWriteAdaptiveCharacteristic(peripheral,
-				characteristic,
-				enabled,
-				address);
+
+		if (AAPAdaptiveCharacteristic(peripheral)) {
+			AAPWriteCharacteristicIfAvailable(peripheral, address);
 		} else {
-			AAPAdaptiveLog(@"adaptive BLE characteristic missing address=%@ services=%lu",
-				address,
-				(unsigned long)peripheral.services.count);
 			AAPRequestCharacteristicDiscovery(peripheral, address);
 		}
 	}
 }
 
-%end
-
-%end
-
-%group PACharacteristicDiscoveryHooks
-
-%hook PAAccessoryManager
-
 - (void)peripheral:(CBPeripheral *)peripheral
 	didDiscoverCharacteristicsForService:(CBService *)service
 	error:(NSError *)error {
+	%orig;
 	if (error) {
 		AAPAdaptiveLog(@"adaptive BLE discovery error=%@ service=%@",
 			error.localizedDescription,
 			service.UUID.UUIDString ?: @"unknown");
 		return;
 	}
-	CBCharacteristic *characteristic =
-		AAPAdaptiveCharacteristic(peripheral);
-	if (!characteristic) {
+	if (!AAPAdaptiveCharacteristic(peripheral)) {
 		return;
 	}
+
 	NSDictionary *uuidToAddress = [self uuidToAddress];
-	NSString *address = uuidToAddress[peripheral.identifier.UUIDString ?: @""];
-	if (![address isKindOfClass:[NSString class]] || !address.length) {
-		AAPAdaptiveLog(@"adaptive BLE discovered but address is unknown peripheral=%@",
+	NSString *address =
+		uuidToAddress[peripheral.identifier.UUIDString ?: @""];
+	if (![address isKindOfClass:[NSString class]] ||
+		!address.length) {
+		AAPAdaptiveLog(@"adaptive BLE discovered without address peripheral=%@",
 			peripheral.identifier.UUIDString ?: @"unknown");
 		return;
 	}
-	AAPWriteAdaptiveCharacteristic(peripheral,
-		characteristic,
-		AAPAdaptiveEnabledForAddress(address),
-		address);
+	AAPWriteCharacteristicIfAvailable(peripheral, address);
 }
+
+%end
 
 %end
 
@@ -419,19 +553,18 @@ static void AAPRequestCharacteristicDiscovery(CBPeripheral *peripheral,
 
 - (NSInteger)tableView:(UITableView *)tableView
 	numberOfRowsInSection:(NSInteger)section {
-	BluetoothDevice *device = AAPBluetoothDevice(self);
-	unsigned int productId = [device productId];
-	NSInteger sectionCount = [tableView numberOfSections];
-	if (sectionCount > 0 && section == sectionCount - 1) {
-		AAPAdaptiveLog(@"settings productId=%u address=%@ supported=%d",
+	if (section == 6) {
+		BluetoothDevice *device = AAPBluetoothDevice(self);
+		unsigned int productId = device.productId;
+		NSString *address = device.address;
+		BOOL supported = AAPProductSupported(productId);
+		AAPAdaptiveLog(@"settings section=%ld productId=%u address=%@ supported=%d",
+			(long)section,
 			productId,
-			[device address] ?: @"unknown",
-			AAPProductSupported(productId));
-		if (AAPProductSupported(productId)) {
-			NSBundle *bundle = [NSBundle bundleWithPath:
-				@"/System/Library/PreferenceBundles/AccessibilitySettings.bundle"];
-			[bundle load];
-			[[bundle classNamed:@"AccessibilitySettingsController"] new];
+			address ?: @"unknown",
+			supported);
+		if (supported) {
+			AAPKickstartHearing();
 			return %orig + 1;
 		}
 	}
@@ -445,9 +578,9 @@ static void AAPRequestCharacteristicDiscovery(CBPeripheral *peripheral,
 	}
 	BOOL requested = toggle.isOn;
 	BluetoothDevice *device = AAPBluetoothDevice(self);
-	NSString *address = [device address];
+	NSString *address = device.address;
 	if (!device || !address.length) {
-		AAPAdaptiveLog(@"toggle failed: no connected BluetoothDevice");
+		AAPAdaptiveLog(@"toggle failed: no BluetoothDevice address");
 		AAPSetSwitchOn(toggle, !requested);
 		return;
 	}
@@ -455,9 +588,28 @@ static void AAPRequestCharacteristicDiscovery(CBPeripheral *peripheral,
 	toggle.enabled = NO;
 	AAPAdaptiveLog(@"toggle requested enabled=%d productId=%u address=%@",
 		requested,
-		[device productId],
+		device.productId,
 		address);
-	AAPSetAdaptiveEnabledForAddress(address, requested);
+	AAPStoreAdaptivePreference(address, requested);
+
+	id settings = AAPSharedPASettings();
+	if (settings) {
+		SEL setter =
+			NSSelectorFromString(@"setAdaptiveTransparencyEnabled:forAddress:");
+		if ([settings respondsToSelector:setter]) {
+			((void (*)(id, SEL, BOOL, NSString *))objc_msgSend)(settings,
+				setter,
+				requested,
+				address);
+		} else {
+			AAPWriteSystemHearingProtection(settings,
+				address,
+				requested,
+				YES);
+		}
+	} else {
+		AAPAdaptiveLog(@"PASettings sharedInstance unavailable");
+	}
 
 	BluetoothDevice *runtimeDevice = AAPDeviceForAddress(address);
 	if (!runtimeDevice) {
@@ -475,58 +627,55 @@ static void AAPRequestCharacteristicDiscovery(CBPeripheral *peripheral,
 					sent,
 					readback,
 					error ?: @"none");
-				AAPSetSwitchOn(toggle, confirmed ? requested : !requested);
+				AAPSetSwitchOn(toggle,
+					confirmed ? requested : !requested);
 			});
 	});
-	AAPAdaptiveLog(@"toggle stored enabled=%d address=%@",
-		requested,
-		address);
 }
 
 - (UITableViewCell *)tableView:(UITableView *)tableView
 	cellForRowAtIndexPath:(NSIndexPath *)indexPath {
-	BluetoothDevice *device = AAPBluetoothDevice(self);
-	NSString *address = [device address];
-	BOOL supported = AAPProductSupported([device productId]);
-	NSInteger rowCount = [tableView numberOfRowsInSection:indexPath.section];
-	NSInteger sectionCount = [tableView numberOfSections];
-	if (sectionCount <= 0 ||
-		indexPath.section != sectionCount - 1 ||
-		!supported ||
-		indexPath.row != rowCount - 1) {
-		return %orig;
+	if (indexPath.section == 6 && indexPath.row == 1) {
+		BluetoothDevice *device = AAPBluetoothDevice(self);
+		if (AAPProductSupported(device.productId)) {
+			static NSString *cellIdentifier =
+				@"PodsGrant_AdaptiveTransparencyCell";
+			UITableViewCell *cell = [tableView
+				dequeueReusableCellWithIdentifier:cellIdentifier];
+			if (!cell) {
+				cell = [[UITableViewCell alloc]
+					initWithStyle:UITableViewCellStyleSubtitle
+					reuseIdentifier:cellIdentifier];
+				cell.selectionStyle =
+					UITableViewCellSelectionStyleNone;
+				cell.textLabel.text = @"Adaptive Transparency Mode";
+				cell.detailTextLabel.text =
+					@"Automatic ANC / transparency";
+				cell.detailTextLabel.textColor =
+					[UIColor secondaryLabelColor];
+				cell.accessoryView =
+					[[UISwitch alloc] initWithFrame:CGRectZero];
+			}
+
+			UISwitch *toggle = (UISwitch *)cell.accessoryView;
+			[toggle removeTarget:nil
+				action:NULL
+				forControlEvents:UIControlEventAllEvents];
+			BOOL enabled = AAPAdaptiveEnabledForAddress(device.address);
+			toggle.on = enabled;
+			toggle.enabled = YES;
+			[toggle addTarget:self
+				action:@selector(setAdaptiveTransparencyMode:)
+				forControlEvents:UIControlEventValueChanged];
+			AAPKickstartHearing();
+			AAPAdaptiveLog(@"cell productId=%u address=%@ enabled=%d",
+				device.productId,
+				device.address ?: @"unknown",
+				enabled);
+			return cell;
+		}
 	}
-
-	static NSString *cellIdentifier = @"PodsGrant_AdaptiveTransparencyCell";
-	UITableViewCell *cell = [tableView
-		dequeueReusableCellWithIdentifier:cellIdentifier];
-	if (!cell) {
-		cell = [[UITableViewCell alloc]
-			initWithStyle:UITableViewCellStyleSubtitle
-			reuseIdentifier:cellIdentifier];
-		cell.selectionStyle = UITableViewCellSelectionStyleNone;
-		cell.textLabel.text = @"Adaptive Transparency Mode";
-		cell.detailTextLabel.text = @"Automatic ANC / transparency";
-		cell.detailTextLabel.textColor = [UIColor secondaryLabelColor];
-		cell.accessoryView = [[UISwitch alloc] initWithFrame:CGRectZero];
-	}
-
-	UISwitch *toggle = (UISwitch *)cell.accessoryView;
-	[toggle removeTarget:nil
-		action:NULL
-		forControlEvents:UIControlEventAllEvents];
-
-	BOOL enabled = AAPAdaptiveEnabledForAddress(address);
-	toggle.on = enabled;
-	toggle.enabled = YES;
-	[toggle addTarget:self
-		action:@selector(setAdaptiveTransparencyMode:)
-		forControlEvents:UIControlEventValueChanged];
-	AAPAdaptiveLog(@"cell productId=%u address=%@ enabled=%d",
-		[device productId],
-		address ?: @"unknown",
-		enabled);
-	return cell;
+	return %orig;
 }
 
 %end
@@ -546,27 +695,15 @@ static void AAPRequestCharacteristicDiscovery(CBPeripheral *peripheral,
 			return;
 		}
 	}
-	NSString *bundleIdentifier = [[NSBundle mainBundle] bundleIdentifier];
+
+	NSString *bundleIdentifier =
+		[[NSBundle mainBundle] bundleIdentifier];
 	if ([bundleIdentifier isEqualToString:@"com.apple.Preferences"]) {
-		Class settingsClass = objc_getClass("PASettings");
-		if (settingsClass) {
-			AAPPASettingsApplyRuntimeMethods();
-		} else {
-			AAPAdaptiveLog(@"PASettings unavailable; using adaptive plist only");
-		}
+		AAPInstallPASettingsMethods();
 		[[NSBundle bundleWithPath:
 			@"/System/Library/PreferenceBundles/BluetoothSettings.bundle"] load];
 		%init(BluetoothSettingsHooks);
 	}
+
 	%init(PAAccessoryHooks);
-	Class managerClass = objc_getClass("PAAccessoryManager");
-	SEL discoverySelector = @selector(peripheral:
-		didDiscoverCharacteristicsForService:
-		error:);
-	if (managerClass &&
-		class_getInstanceMethod(managerClass, discoverySelector)) {
-		%init(PACharacteristicDiscoveryHooks);
-	} else {
-		AAPAdaptiveLog(@"characteristic discovery callback unavailable");
-	}
 }
