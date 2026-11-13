@@ -1,0 +1,10 @@
+#!/bin/sh
+
+echo Reloading daemons
+killall -TERM Preferences 2>/dev/null || true
+killall -TERM bluetoothd 2>/dev/null || true
+killall -TERM sharingd 2>/dev/null || true
+killall -TERM heard 2>/dev/null || true
+killall -TERM SharingViewService 2>/dev/null || true
+
+exit 0

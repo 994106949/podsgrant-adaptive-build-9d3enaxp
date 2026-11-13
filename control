@@ -1,0 +1,9 @@
+Package: com.lns.pogr
+Name: PodsGrant Adaptive
+Version: 0.5.4~roothide4
+Architecture: iphoneos-arm64e
+Description: PodsGrant Adaptive Audio for AirPods 4 on iOS 16.2
+Maintainer: Ruphane
+Author: Ruphane
+Section: Tweaks
+Depends: ellekit (>= 1.0.0), preferenceloader

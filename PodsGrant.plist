@@ -1,0 +1,1 @@
+{ Filter = { Executables = ( "bluetoothd", "sharingd", "SharingViewService" ); Bundles = ( "com.apple.SpringBoard" ); }; }

@@ -1,0 +1,98 @@
+name: Build PodsGrant RootHide
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  package:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packaging tools
+        run: |
+          brew install ldid dpkg
+
+      - name: Prepare RootHide Theos
+        run: |
+          git clone --recursive https://github.com/roothide/theos.git "$HOME/theos"
+          git clone --depth=1 https://github.com/theos/sdks.git "$RUNNER_TEMP/theos-sdks"
+          cp -R "$RUNNER_TEMP/theos-sdks/." "$HOME/theos/sdks/"
+          echo "THEOS=$HOME/theos" >> "$GITHUB_ENV"
+
+      - name: Validate plist files
+        run: |
+          find . -name "*.plist" -not -path "./packages/*" -print0 |
+            while IFS= read -r -d '' plist; do plutil -lint "$plist"; done
+
+      - name: Build RootHide package
+        run: |
+          make clean package FINALPACKAGE=1 \
+            THEOS_PACKAGE_SCHEME=roothide \
+            TARGET=iphone:clang:16.5:13.0
+
+      - name: Verify package contents
+        run: |
+          python3 - <<'PY'
+          import gzip
+          import io
+          import lzma
+          import pathlib
+          import struct
+          import tarfile
+
+          packages = list(pathlib.Path("packages").glob("*.deb"))
+          if len(packages) != 1:
+              raise SystemExit(f"expected one package, found {packages}")
+          package = packages[0]
+          raw = package.read_bytes()
+          if not raw.startswith(b"!<arch>\n"):
+              raise SystemExit("not a Debian ar archive")
+          members = {}
+          offset = 8
+          while offset < len(raw):
+              name = raw[offset:offset + 16].decode("ascii").strip().rstrip("/")
+              size = int(raw[offset + 48:offset + 58].decode("ascii").strip())
+              start = offset + 60
+              members[name] = raw[start:start + size]
+              offset = start + size + (size & 1)
+          payload_name = next(name for name in members if name.startswith("data.tar"))
+          data = members[payload_name]
+          if payload_name.endswith(".gz"):
+              data = gzip.decompress(data)
+          elif payload_name.endswith(".lzma"):
+              data = lzma.decompress(data)
+          with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+              names = {member.name.lstrip("./") for member in archive}
+          required = {
+              "Library/MobileSubstrate/DynamicLibraries/PodsGrant.dylib",
+              "Library/MobileSubstrate/DynamicLibraries/podsgrantadaptivetransparency.dylib",
+              "Library/MobileSubstrate/DynamicLibraries/podsgrantadaptivetransparency.plist",
+              "Library/PreferenceBundles/podsgrantsettings.bundle/podsgrantsettings",
+          }
+          missing = sorted(required - names)
+          if missing:
+              raise SystemExit(f"missing payload files: {missing}")
+          import re
+          plist_name = (
+              "Library/MobileSubstrate/DynamicLibraries/"
+              "podsgrantadaptivetransparency.plist"
+          )
+          with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+              plist_data = archive.extractfile(plist_name).read().decode("utf-8")
+          if not re.search(r'heard', plist_data):
+              raise SystemExit("child tweak filter does not include heard")
+          forbidden = sorted(name for name in names if name.startswith("var/jb/"))
+          if forbidden:
+              raise SystemExit(f"unexpected var/jb payload: {forbidden}")
+          print(f"package={package} files={len(names)}")
+          PY
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: PodsGrantAdaptive-roothide
+          path: packages/*.deb
+          if-no-files-found: error
