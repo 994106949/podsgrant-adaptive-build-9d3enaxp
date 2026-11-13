@@ -2,6 +2,7 @@
 
 echo Removing configuration and diagnostics
 rm -f /var/mobile/Library/Preferences/com.lns.pogr.bin
+rm -f /var/mobile/Library/Preferences/com.lns.pogr.adaptive.plist
 rm -f /var/mobile/Library/Preferences/com.lns.pogr.adaptive.log
 killall -TERM Preferences 2>/dev/null || true
 killall -TERM bluetoothd 2>/dev/null || true
