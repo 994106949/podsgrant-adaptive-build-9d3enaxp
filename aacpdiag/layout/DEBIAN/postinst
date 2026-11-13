@@ -1,0 +1,8 @@
+#!/bin/sh
+
+echo "Reloading processes for AACP diagnostics"
+killall -TERM Preferences 2>/dev/null || true
+killall -TERM bluetoothd 2>/dev/null || true
+killall -TERM heard 2>/dev/null || true
+
+exit 0

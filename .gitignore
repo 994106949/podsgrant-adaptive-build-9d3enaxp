@@ -1,3 +1,6 @@
 .theos/
+.theos-inspect/
 packages/
 .DS_Store
+__pycache__/
+*.pyc
