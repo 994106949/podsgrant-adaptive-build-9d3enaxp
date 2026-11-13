@@ -382,10 +382,11 @@ static void AAPRequestCharacteristicDiscovery(CBPeripheral *peripheral,
 
 %group PACharacteristicDiscoveryHooks
 
+%hook PAAccessoryManager
+
 - (void)peripheral:(CBPeripheral *)peripheral
 	didDiscoverCharacteristicsForService:(CBService *)service
 	error:(NSError *)error {
-	%orig;
 	if (error) {
 		AAPAdaptiveLog(@"adaptive BLE discovery error=%@ service=%@",
 			error.localizedDescription,
