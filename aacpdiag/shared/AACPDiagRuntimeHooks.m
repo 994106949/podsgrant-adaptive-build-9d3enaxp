@@ -92,14 +92,13 @@ typedef struct {
 	char *selectorName;
 } AAPDiagMethodRecord;
 
+#if !AACPDIAG_TRANSPORT_SAFE_MODE
 static AAPDiagMethodRecord AAPDiagMethodRecords[AAP_DIAG_HOOK_RECORDS];
 static size_t AAPDiagMethodRecordCount;
 static pthread_mutex_t AAPDiagMethodLock = PTHREAD_MUTEX_INITIALIZER;
 static __thread int AAPDiagMethodHookDepth;
 static NSMutableSet<NSString *> *AAPDiagInventoriedClasses;
 static pthread_mutex_t AAPDiagInventoryLock = PTHREAD_MUTEX_INITIALIZER;
-
-#if !AACPDIAG_TRANSPORT_SAFE_MODE
 static const char *const AAPDiagWatchedClasses[] = {
 	"BluetoothDevice",
 	"BluetoothManager",
@@ -111,6 +110,7 @@ static const char *const AAPDiagWatchedClasses[] = {
 };
 #endif
 
+#if !AACPDIAG_TRANSPORT_SAFE_MODE
 static const char *const AAPDiagCoreSelectors[] = {
 	"address",
 	"productId",
@@ -125,6 +125,7 @@ static const char *const AAPDiagCoreSelectors[] = {
 	"peripheral:didUpdateValueForCharacteristic:error:",
 	"peripheral:didModifyServices:",
 };
+#endif
 
 static uint64_t AAPDiagMonotonicMicroseconds(void) {
 	struct timespec value = {0};
@@ -713,6 +714,7 @@ NSArray<NSDictionary<NSString *, id> *> *
 	return frames;
 }
 
+#if !AACPDIAG_TRANSPORT_SAFE_MODE
 static BOOL AAPDiagTypeIsSupported(const char *type, BOOL allowVoid) {
 	if (!type) {
 		return NO;
@@ -1080,7 +1082,6 @@ static void AAPDiagHookClassMethods(Class cls, BOOL classMethods) {
 	free(methods);
 }
 
-#if !AACPDIAG_TRANSPORT_SAFE_MODE
 static void AAPDiagInstallClassHooksForName(const char *className,
 	size_t inventoryIndex) {
 	(void)inventoryIndex;
