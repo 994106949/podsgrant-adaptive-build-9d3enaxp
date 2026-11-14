@@ -8,12 +8,31 @@
 
 #import "../shared/AACPDiag.h"
 
+static BOOL AAPDiagHelperIsBluetoothd;
+static BOOL AAPDiagHelperIsHeard;
+
+static NSString *AAPDiagHelperSource(void) {
+	if (AAPDiagHelperIsBluetoothd) {
+		return @"bluetoothd";
+	}
+	if (AAPDiagHelperIsHeard) {
+		return @"heard";
+	}
+	return @"unknown";
+}
+
 static void AAPDiagWriteResult(NSDictionary<NSString *, id> *result) {
-	BOOL written = AAPDiagWritePlistToPaths(result, AAPDiagResultPaths());
-	AAPDiagLog(@"helper result_write=%d sequence=%llu status=%@",
+	NSMutableDictionary *payload = [result mutableCopy] ?: [NSMutableDictionary dictionary];
+	payload[@"source"] = AAPDiagHelperSource();
+	BOOL written = AAPDiagWritePlistToPaths(payload, AAPDiagResultPaths());
+	AAPDiagLog(@"helper result_write=%d source=%@ sequence=%llu status=%@ "
+		@"variant=%@ rx_count=%lu",
 		written,
-		[result[@"sequence"] unsignedLongLongValue],
-		result[@"status"] ?: @"unknown");
+		AAPDiagHelperSource(),
+		[payload[@"sequence"] unsignedLongLongValue],
+		payload[@"status"] ?: @"unknown",
+		payload[@"socket_variant"] ?: @"none",
+		(unsigned long)[payload[@"rx_packets"] count]);
 	notify_post(AAPDiagNotifyName);
 }
 
@@ -53,19 +72,45 @@ static void AAPDiagHandleRequest(void) {
 			mode);
 		AAPDiagLog(@"helper request_path=%@", requestPath);
 		AAPDiagLog(@"diag_marker source=helper event=request_received "
-			@"sequence=%llu address=%@ mode=%u",
+			@"process=%@ sequence=%llu address=%@ mode=%u",
+			AAPDiagHelperSource(),
 			sequence,
 			address ?: @"nil",
 			mode);
 		if (!address.length || sequence == 0) {
+			NSMutableDictionary *invalid = [@{
+				@"status": @"invalid_request",
+				@"mode": @(mode),
+				@"sequence": @(sequence),
+				@"address": address ?: @"",
+				@"trace": @[
+					address.length ? @"invalid_sequence" : @"invalid_address",
+				],
+				@"rx_packets": @[],
+				@"timestamp": @([[NSDate date] timeIntervalSince1970]),
+			} mutableCopy];
+			AAPDiagWriteResult(invalid);
 			return;
 		}
 
+		AAPDiagLog(@"helper_transport_start source=%@ sequence=%llu "
+			@"address=%@ mode=%u",
+			AAPDiagHelperSource(),
+			sequence,
+			address,
+			mode);
 		NSDictionary *transport = AAPDiagRunTransportTest(address, mode);
 		NSMutableDictionary *result = [transport mutableCopy];
 		result[@"sequence"] = @(sequence);
-		result[@"source"] = @"bluetoothd";
 		result[@"request_path"] = requestPath ?: @"";
+		AAPDiagLog(@"helper_transport_done source=%@ sequence=%llu "
+			@"status=%@ variant=%@ tx_bytes=%@ rx_count=%lu",
+			AAPDiagHelperSource(),
+			sequence,
+			result[@"status"] ?: @"unknown",
+			result[@"socket_variant"] ?: @"none",
+			result[@"mode_frame"] ?: @"none",
+			(unsigned long)[result[@"rx_packets"] count]);
 		AAPDiagWriteResult(result);
 	}
 }
@@ -147,14 +192,18 @@ static void AAPDiagStartWatchdog(void) {
 		dispatch_resume(timer);
 
 		int token = 0;
-		notify_register_dispatch(
+		int status = notify_register_dispatch(
 			AAPDiagNotifyName,
 			&token,
 			dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
 			^(int notifiedToken) {
 				AAPDiagNotifyCallback(notifiedToken);
 			});
-		AAPDiagLog(@"helper_watchdog started interval_ms=250");
+		AAPDiagLog(@"helper_watchdog started source=%@ interval_ms=250 "
+			@"notify_status=%d notify_token=%d",
+			AAPDiagHelperSource(),
+			status,
+			token);
 	});
 }
 
@@ -185,20 +234,21 @@ static void AAPDiagStartWatchdog(void) {
 			processName);
 		return;
 	}
+	AAPDiagHelperIsBluetoothd = isBluetoothd;
+	AAPDiagHelperIsHeard = isHeard;
 
 	AAPDiagWriteHelperReady(@{
 		@"status": @"helper_loaded",
 		@"executable": executable,
 		@"is_bluetoothd": @(isBluetoothd),
 		@"is_heard": @(isHeard),
-		@"version": @"0.5.7~adts3diag4",
+		@"source": AAPDiagHelperSource(),
+		@"version": @"0.5.7~adts3diag5",
 	});
-	AAPDiagLog(@"helper_loaded executable=%@ process=%@",
+	AAPDiagLog(@"helper_loaded executable=%@ process=%@ source=%@",
 		executable,
-		processName);
-	if (!isBluetoothd) {
-		return;
-	}
+		processName,
+		AAPDiagHelperSource());
 
 	AAPDiagInstallRuntimeHooks();
 	CFNotificationCenterAddObserver(
@@ -214,6 +264,7 @@ static void AAPDiagStartWatchdog(void) {
 		@"executable": executable,
 		@"is_bluetoothd": @(isBluetoothd),
 		@"is_heard": @(isHeard),
-		@"version": @"0.5.7~adts3diag4",
+		@"source": AAPDiagHelperSource(),
+		@"version": @"0.5.7~adts3diag5",
 	});
 }

@@ -124,7 +124,7 @@ def main() -> int:
     control = read_control(members)
     if control.get("Package") != "com.lns.pogr.aacpdiag":
         raise ValueError(f"unexpected Package: {control.get('Package')!r}")
-    if control.get("Version") != "0.5.7~adts3diag4":
+    if control.get("Version") != "0.5.7~adts3diag5":
         raise ValueError(f"unexpected Version: {control.get('Version')!r}")
 
     payload_name, archive = read_payload(members)

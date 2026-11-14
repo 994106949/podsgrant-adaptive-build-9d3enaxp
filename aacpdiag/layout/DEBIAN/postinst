@@ -4,6 +4,29 @@ echo "Reloading processes for AACP diagnostics"
 mkdir -p /var/tmp/com.lns.pogr.aacpdiag /tmp/com.lns.pogr.aacpdiag
 chmod 0777 /var/tmp/com.lns.pogr.aacpdiag /tmp/com.lns.pogr.aacpdiag
 chmod 0777 /var/tmp /tmp 2>/dev/null || true
+
+LOG=/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.log
+PACKAGE_VERSION=0.5.7~adts3diag5
+PACKAGE_PATH="${DPKG_ADMINDIR:-/var/lib/dpkg}/info/com.lns.pogr.aacpdiag.list"
+{
+	echo "$(date '+%Y-%m-%d %H:%M:%S.000') pid=$$ [postinst] install_begin version=$PACKAGE_VERSION package_list=$PACKAGE_PATH"
+	if [ -r "$PACKAGE_PATH" ]; then
+		sed 's/^/installed_file=/' "$PACKAGE_PATH"
+	else
+		echo "install_package_list_missing path=$PACKAGE_PATH"
+	fi
+	for candidate in \
+		/Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiagHelper.dylib \
+		/var/jb/Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiagHelper.dylib \
+		/usr/lib/TweakInject/PodsGrantAACPDiagHelper.dylib \
+		/var/jb/usr/lib/TweakInject/PodsGrantAACPDiagHelper.dylib
+	do
+		if [ -f "$candidate" ]; then
+			echo "install_helper_path=$candidate"
+		fi
+	done
+} >> "$LOG"
+
 rm -f /var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.request.plist
 rm -f /var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result.plist
 rm -f /var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper.plist
@@ -16,5 +39,13 @@ rm -f /tmp/com.lns.pogr.aacpdiag/helper.plist
 killall -TERM Preferences 2>/dev/null || true
 killall -TERM bluetoothd 2>/dev/null || true
 killall -TERM heard 2>/dev/null || true
+
+for process in Preferences bluetoothd heard; do
+	if killall -0 "$process" 2>/dev/null; then
+		echo "process_restart_status name=$process state=still_running"
+	else
+		echo "process_restart_status name=$process state=stopped_or_restart_pending"
+	fi
+done >> "$LOG"
 
 exit 0

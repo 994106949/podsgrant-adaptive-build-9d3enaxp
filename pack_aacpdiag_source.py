@@ -48,7 +48,7 @@ def main() -> int:
     missing = sorted(required - names)
     if missing:
         raise SystemExit(f"packed archive is missing files: {missing}")
-    if version != ["Version: 0.5.7~adts3diag4"]:
+    if version != ["Version: 0.5.7~adts3diag5"]:
         raise SystemExit(f"unexpected packed version: {version}")
 
     print(f"archive={ARCHIVE}")
