@@ -8,8 +8,7 @@ TWEAK_NAME = PodsGrantAACPDiagHelper
 PodsGrantAACPDiagHelper_FILES = Tweak.x \
 	../shared/AACPDiagCommon.m \
 	../shared/AACPDiagNative.m \
-	../shared/AACPDiagRuntimeHooks.m \
-	../shared/AACPDiagTransport.m
+	../shared/AACPDiagRuntimeHooks.m
 PodsGrantAACPDiagHelper_CFLAGS = -fobjc-arc
 PodsGrantAACPDiagHelper_FRAMEWORKS = Foundation
 

@@ -48,6 +48,13 @@ def read_payload(members: dict[str, bytes]) -> tuple[str, tarfile.TarFile]:
     return payload_name, tarfile.open(fileobj=io.BytesIO(data))
 
 
+def normalize_payload_name(name: str) -> str:
+    normalized = name.lstrip("./")
+    if normalized.startswith("var/jb/"):
+        normalized = normalized[len("var/jb/") :]
+    return normalized
+
+
 def read_control(members: dict[str, bytes]) -> dict[str, str]:
     control_name = next(
         name for name in members if name.startswith("control.tar")
@@ -124,20 +131,26 @@ def main() -> int:
     control = read_control(members)
     if control.get("Package") != "com.lns.pogr.aacpdiag":
         raise ValueError(f"unexpected Package: {control.get('Package')!r}")
-    if control.get("Version") != "0.5.7~adts3diag5":
+    if control.get("Version") != "0.5.7~adts3diag6":
         raise ValueError(f"unexpected Version: {control.get('Version')!r}")
 
     payload_name, archive = read_payload(members)
-    files = {
-        member.name.lstrip("./"): member
-        for member in archive.getmembers()
-        if member.isfile()
-    }
+    files: dict[str, tarfile.TarInfo] = {}
+    for member in archive.getmembers():
+        if not member.isfile():
+            continue
+        normalized = normalize_payload_name(member.name)
+        if normalized in files:
+            raise ValueError(f"duplicate normalized payload path: {normalized}")
+        files[normalized] = member
+
     required = {
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiag.dylib",
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiag.plist",
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiagHelper.dylib",
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiagHelper.plist",
+        "Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist",
+        "usr/bin/aacpdiagd",
     }
     missing = sorted(required - set(files))
     if missing:
@@ -150,6 +163,7 @@ def main() -> int:
     for dylib_name in (
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiag.dylib",
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiagHelper.dylib",
+        "usr/bin/aacpdiagd",
     ):
         extracted = archive.extractfile(files[dylib_name])
         if extracted is None:
@@ -160,6 +174,47 @@ def main() -> int:
                 f"{dylib_name} architectures {architectures} do not contain "
                 f"{expected_architectures}"
             )
+
+    if files["usr/bin/aacpdiagd"].mode & 0o111 == 0:
+        raise ValueError("usr/bin/aacpdiagd is not executable")
+    expected_plist_path = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "daemon"
+        / "com.lns.pogr.aacpdiagd.plist"
+    )
+    if not expected_plist_path.is_file():
+        raise ValueError(f"source daemon plist is missing: {expected_plist_path}")
+    expected_plist = expected_plist_path.read_bytes()
+    daemon_plist_name = "Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist"
+    daemon_plist_extracted = archive.extractfile(files[daemon_plist_name])
+    if daemon_plist_extracted is None:
+        raise ValueError("cannot read packaged LaunchDaemon plist")
+    daemon_plist_bytes = daemon_plist_extracted.read()
+    if daemon_plist_bytes != expected_plist:
+        raise ValueError("packaged LaunchDaemon plist differs from source")
+
+    daemon_plist = plistlib.loads(daemon_plist_bytes)
+    if daemon_plist.get("Label") != "com.lns.pogr.aacpdiagd":
+        raise ValueError("LaunchDaemon has an unexpected Label")
+    if daemon_plist.get("ProgramArguments") != [
+        "/var/jb/usr/bin/aacpdiagd"
+    ]:
+        raise ValueError("LaunchDaemon has an unexpected ProgramArguments")
+    for key in ("RunAtLoad", "KeepAlive"):
+        if daemon_plist.get(key) is not True:
+            raise ValueError(f"LaunchDaemon {key} must be true")
+    if daemon_plist.get("ThrottleInterval") != 2:
+        raise ValueError("LaunchDaemon has an unexpected ThrottleInterval")
+    if daemon_plist.get("ProcessType") != "Background":
+        raise ValueError("LaunchDaemon has an unexpected ProcessType")
+    if daemon_plist.get("StandardOutPath") != (
+        "/var/tmp/com.lns.pogr.aacpdiag/daemon-stdout.log"
+    ):
+        raise ValueError("LaunchDaemon has an unexpected StandardOutPath")
+    if daemon_plist.get("StandardErrorPath") != (
+        "/var/tmp/com.lns.pogr.aacpdiag/daemon-stderr.log"
+    ):
+        raise ValueError("LaunchDaemon has an unexpected StandardErrorPath")
 
     ui_filter_name = (
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiag.plist"
@@ -186,8 +241,31 @@ def main() -> int:
         helper_filter.get("Filter", {}).get("Executables", [])
     ):
         raise ValueError("helper filter is missing heard")
-    if any(name.startswith("var/jb/") for name in files):
-        raise ValueError("unexpected rootless var/jb payload")
+
+    binary_markers = {
+        "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiag.dylib": (
+            b"source=aacp_ui",
+            b"0.5.7~adts3diag6",
+        ),
+        "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiagHelper.dylib": (
+            b"source=helper",
+            b"0.5.7~adts3diag6",
+        ),
+        "usr/bin/aacpdiagd": (
+            b"source=aacpdiagd",
+            b"0.5.7~adts3diag6",
+        ),
+    }
+    for binary_name, markers in binary_markers.items():
+        extracted = archive.extractfile(files[binary_name])
+        if extracted is None:
+            raise ValueError(f"cannot read {binary_name}")
+        data = extracted.read()
+        missing_markers = [marker for marker in markers if marker not in data]
+        if missing_markers:
+            raise ValueError(
+                f"{binary_name} is missing markers: {missing_markers}"
+            )
 
     print(
         f"package={package} payload={payload_name} files={len(files)} "

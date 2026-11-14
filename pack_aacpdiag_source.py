@@ -29,8 +29,15 @@ def main() -> int:
 
     required = {
         "aacpdiag/control",
+        "aacpdiag/daemon/main.m",
+        "aacpdiag/daemon/Makefile",
+        "aacpdiag/daemon/com.lns.pogr.aacpdiagd.plist",
+        "aacpdiag/layout/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist",
+        "aacpdiag/layout/DEBIAN/postinst",
+        "aacpdiag/layout/DEBIAN/postrm",
         "aacpdiag/shared/AACPDiagNative.m",
         "aacpdiag/shared/AACPDiagRuntimeHooks.m",
+        "aacpdiag/shared/AACPDiagTransport.m",
         "aacpdiag/ui/Tweak.x",
         "aacpdiag/tools/verify_package.py",
     }
@@ -48,7 +55,7 @@ def main() -> int:
     missing = sorted(required - names)
     if missing:
         raise SystemExit(f"packed archive is missing files: {missing}")
-    if version != ["Version: 0.5.7~adts3diag5"]:
+    if version != ["Version: 0.5.7~adts3diag6"]:
         raise SystemExit(f"unexpected packed version: {version}")
 
     print(f"archive={ARCHIVE}")

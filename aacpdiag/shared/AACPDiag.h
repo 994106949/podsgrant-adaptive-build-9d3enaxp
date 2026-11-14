@@ -3,6 +3,8 @@
 NS_ASSUME_NONNULL_BEGIN
 
 extern NSString *const AAPDiagLogPath;
+extern NSString *const AAPDiagFallbackLogPath;
+extern NSString *const AAPDiagTmpLogPath;
 extern NSString *const AAPDiagRequestPath;
 extern NSString *const AAPDiagResultPath;
 extern NSString *const AAPDiagFallbackRequestPath;
@@ -14,6 +16,7 @@ extern NSString *const AAPDiagFallbackReadyPath;
 extern NSString *const AAPDiagTmpReadyPath;
 extern NSString *const AAPDiagDarwinNotification;
 extern const char *const AAPDiagNotifyName;
+extern NSString *const AAPDiagVersion;
 
 typedef NS_ENUM(unsigned int, AAPDiagMode) {
 	AAPDiagModeNoiseCancellation = 2,
@@ -22,6 +25,7 @@ typedef NS_ENUM(unsigned int, AAPDiagMode) {
 };
 
 void AAPDiagLog(NSString *format, ...) NS_FORMAT_FUNCTION(1, 2);
+void AAPDiagLogToPath(NSString *path, NSString *format, ...) NS_FORMAT_FUNCTION(2, 3);
 void AAPDiagSetLogMirroring(BOOL enabled);
 NSString * _Nullable AAPDiagNormalizeAddress(NSString * _Nullable address);
 NSString *AAPDiagHex(NSData * _Nullable data);
@@ -44,9 +48,17 @@ BOOL AAPDiagWriteHelperRequest(NSString *address,
 	unsigned long long sequence);
 NSDictionary<NSString *, id> * _Nullable AAPDiagReadHelperResult(
 	unsigned long long sequence);
+NSDictionary<NSString *, id> * _Nullable AAPDiagReadResultForSource(
+	unsigned long long sequence,
+	NSString * _Nullable source);
 BOOL AAPDiagWritePlistToPaths(NSDictionary<NSString *, id> *plist,
 	NSArray<NSString *> *paths);
 BOOL AAPDiagWriteHelperReady(NSDictionary<NSString *, id> *ready);
 NSDictionary<NSString *, id> * _Nullable AAPDiagReadHelperReady(void);
+NSDictionary<NSString *, id> * _Nullable AAPDiagReadReadyForSource(
+	NSString * _Nullable source);
+
+void AAPDiagEnsureRuntimeDirectories(void);
+void AAPDiagRemoveRequestAndResultPaths(void);
 
 NS_ASSUME_NONNULL_END

@@ -409,7 +409,7 @@ NSDictionary<NSString *, id> *AAPDiagRunTransportTest(NSString *address,
 	if (configSent) {
 		AAPDiagWaitForSetting(fd,
 			AAPDiagListeningConfigID,
-			mode,
+			0x0F,
 			AAP_CONFIG_WAIT_MS,
 			trace,
 			packets,

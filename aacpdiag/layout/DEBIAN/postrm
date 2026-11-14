@@ -1,14 +1,29 @@
 #!/bin/sh
 
-rm -f /var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.request.plist
-rm -f /var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result.plist
-rm -f /var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper.plist
-rm -f /var/tmp/com.lns.pogr.aacpdiag/request.plist
-rm -f /var/tmp/com.lns.pogr.aacpdiag/result.plist
-rm -f /var/tmp/com.lns.pogr.aacpdiag/helper.plist
-rm -f /tmp/com.lns.pogr.aacpdiag/request.plist
-rm -f /tmp/com.lns.pogr.aacpdiag/result.plist
-rm -f /tmp/com.lns.pogr.aacpdiag/helper.plist
+PLIST=/var/jb/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist
+
+launchctl bootout system/com.lns.pogr.aacpdiagd >/dev/null 2>&1 || true
+if [ -f "$PLIST" ]; then
+	launchctl unload -w "$PLIST" >/dev/null 2>&1 || true
+fi
+killall -TERM aacpdiagd 2>/dev/null || true
+
+rm -f \
+	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.request.plist \
+	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result.plist \
+	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper.plist \
+	/var/tmp/com.lns.pogr.aacpdiag/request.plist \
+	/var/tmp/com.lns.pogr.aacpdiag/result.plist \
+	/var/tmp/com.lns.pogr.aacpdiag/helper.plist \
+	/var/tmp/com.lns.pogr.aacpdiag/helper-boot.log \
+	/var/tmp/com.lns.pogr.aacpdiag/daemon-stdout.log \
+	/var/tmp/com.lns.pogr.aacpdiag/daemon-stderr.log \
+	/tmp/com.lns.pogr.aacpdiag/request.plist \
+	/tmp/com.lns.pogr.aacpdiag/result.plist \
+	/tmp/com.lns.pogr.aacpdiag/helper.plist \
+	/tmp/com.lns.pogr.aacpdiag/helper-boot.log
+
+rmdir /var/tmp/com.lns.pogr.aacpdiag /tmp/com.lns.pogr.aacpdiag 2>/dev/null || true
 killall -TERM Preferences 2>/dev/null || true
 killall -TERM bluetoothd 2>/dev/null || true
 killall -TERM heard 2>/dev/null || true

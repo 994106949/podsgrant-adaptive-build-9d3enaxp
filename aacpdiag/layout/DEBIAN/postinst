@@ -1,51 +1,118 @@
 #!/bin/sh
 
-echo "Reloading processes for AACP diagnostics"
-mkdir -p /var/tmp/com.lns.pogr.aacpdiag /tmp/com.lns.pogr.aacpdiag
-chmod 0777 /var/tmp/com.lns.pogr.aacpdiag /tmp/com.lns.pogr.aacpdiag
-chmod 0777 /var/tmp /tmp 2>/dev/null || true
-
 LOG=/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.log
-PACKAGE_VERSION=0.5.7~adts3diag5
+BOOT_LOG=/var/tmp/com.lns.pogr.aacpdiag/helper-boot.log
+TMP_BOOT_LOG=/tmp/com.lns.pogr.aacpdiag/helper-boot.log
+PACKAGE_VERSION=0.5.7~adts3diag6
+PLIST=/var/jb/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist
+DAEMON=/var/jb/usr/bin/aacpdiagd
 PACKAGE_PATH="${DPKG_ADMINDIR:-/var/lib/dpkg}/info/com.lns.pogr.aacpdiag.list"
-{
-	echo "$(date '+%Y-%m-%d %H:%M:%S.000') pid=$$ [postinst] install_begin version=$PACKAGE_VERSION package_list=$PACKAGE_PATH"
-	if [ -r "$PACKAGE_PATH" ]; then
-		sed 's/^/installed_file=/' "$PACKAGE_PATH"
-	else
-		echo "install_package_list_missing path=$PACKAGE_PATH"
-	fi
-	for candidate in \
-		/Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiagHelper.dylib \
-		/var/jb/Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiagHelper.dylib \
-		/usr/lib/TweakInject/PodsGrantAACPDiagHelper.dylib \
-		/var/jb/usr/lib/TweakInject/PodsGrantAACPDiagHelper.dylib
-	do
-		if [ -f "$candidate" ]; then
-			echo "install_helper_path=$candidate"
-		fi
-	done
-} >> "$LOG"
 
-rm -f /var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.request.plist
-rm -f /var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result.plist
-rm -f /var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper.plist
-rm -f /var/tmp/com.lns.pogr.aacpdiag/request.plist
-rm -f /var/tmp/com.lns.pogr.aacpdiag/result.plist
-rm -f /var/tmp/com.lns.pogr.aacpdiag/helper.plist
-rm -f /tmp/com.lns.pogr.aacpdiag/request.plist
-rm -f /tmp/com.lns.pogr.aacpdiag/result.plist
-rm -f /tmp/com.lns.pogr.aacpdiag/helper.plist
+mkdir -p \
+	/var/mobile/Library/Preferences \
+	/var/tmp/com.lns.pogr.aacpdiag \
+	/tmp/com.lns.pogr.aacpdiag
+chmod 0777 /var/tmp/com.lns.pogr.aacpdiag /tmp/com.lns.pogr.aacpdiag
+touch "$LOG" "$BOOT_LOG" "$TMP_BOOT_LOG"
+chmod 0666 "$LOG" "$BOOT_LOG" "$TMP_BOOT_LOG"
+
+log_line() {
+	for target in "$LOG" "$BOOT_LOG" "$TMP_BOOT_LOG"; do
+		echo "$(date '+%Y-%m-%d %H:%M:%S.000') pid=$$ [postinst] $*" >> "$target"
+	done
+}
+
+log_line "install_begin version=$PACKAGE_VERSION package_list=$PACKAGE_PATH"
+if [ -r "$PACKAGE_PATH" ]; then
+	sed 's/^/installed_file=/' "$PACKAGE_PATH" | while IFS= read -r line; do
+		log_line "$line"
+	done
+else
+	log_line "install_package_list_missing path=$PACKAGE_PATH"
+fi
+
+for candidate in \
+	/Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiagHelper.dylib \
+	/var/jb/Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiagHelper.dylib \
+	/usr/lib/TweakInject/PodsGrantAACPDiagHelper.dylib \
+	/var/jb/usr/lib/TweakInject/PodsGrantAACPDiagHelper.dylib
+do
+	if [ -f "$candidate" ]; then
+		log_line "install_helper_path=$candidate"
+	fi
+done
+
+for target in "$DAEMON" "$PLIST"; do
+	if [ -e "$target" ]; then
+		log_line "install_artifact path=$target exists=1"
+		ls -ld "$target" 2>&1 | while IFS= read -r line; do
+			log_line "install_stat $line"
+		done
+	else
+		log_line "install_artifact path=$target exists=0"
+	fi
+done
+if command -v file >/dev/null 2>&1; then
+	file "$DAEMON" 2>&1 | while IFS= read -r line; do
+		log_line "install_architecture $line"
+	done
+fi
+
+rm -f \
+	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.request.plist \
+	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result.plist \
+	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper.plist \
+	/var/tmp/com.lns.pogr.aacpdiag/request.plist \
+	/var/tmp/com.lns.pogr.aacpdiag/result.plist \
+	/var/tmp/com.lns.pogr.aacpdiag/helper.plist \
+	/var/tmp/com.lns.pogr.aacpdiag/daemon-stdout.log \
+	/var/tmp/com.lns.pogr.aacpdiag/daemon-stderr.log \
+	/tmp/com.lns.pogr.aacpdiag/request.plist \
+	/tmp/com.lns.pogr.aacpdiag/result.plist \
+	/tmp/com.lns.pogr.aacpdiag/helper.plist
+
+log_line "daemon_bootout_begin label=com.lns.pogr.aacpdiagd"
+launchctl bootout system/com.lns.pogr.aacpdiagd >> "$LOG" 2>&1
+BOOTOUT_STATUS=$?
+log_line "daemon_bootout_status=$BOOTOUT_STATUS"
+
+if [ -f "$PLIST" ]; then
+	log_line "daemon_bootstrap_begin plist=$PLIST"
+	launchctl bootstrap system "$PLIST" >> "$LOG" 2>&1
+	BOOTSTRAP_STATUS=$?
+	log_line "daemon_bootstrap_status=$BOOTSTRAP_STATUS"
+	if [ "$BOOTSTRAP_STATUS" -ne 0 ]; then
+		log_line "daemon_bootstrap_fallback plist=$PLIST"
+		launchctl load -w "$PLIST" >> "$LOG" 2>&1
+		LOAD_STATUS=$?
+		log_line "daemon_load_status=$LOAD_STATUS"
+	fi
+	launchctl kickstart -k system/com.lns.pogr.aacpdiagd >> "$LOG" 2>&1
+	KICKSTART_STATUS=$?
+	log_line "daemon_kickstart_status=$KICKSTART_STATUS"
+	launchctl print system/com.lns.pogr.aacpdiagd >> "$LOG" 2>&1
+	PRINT_STATUS=$?
+	log_line "daemon_print_status=$PRINT_STATUS"
+else
+	log_line "daemon_plist_missing path=$PLIST"
+fi
+
+DAEMON_PID=$(pgrep -x aacpdiagd 2>/dev/null | head -n 1)
+if [ -n "$DAEMON_PID" ]; then
+	log_line "daemon_process pid=$DAEMON_PID state=running"
+else
+	log_line "daemon_process pid=- state=not_running"
+fi
+
 killall -TERM Preferences 2>/dev/null || true
 killall -TERM bluetoothd 2>/dev/null || true
 killall -TERM heard 2>/dev/null || true
-
 for process in Preferences bluetoothd heard; do
 	if killall -0 "$process" 2>/dev/null; then
-		echo "process_restart_status name=$process state=still_running"
+		log_line "process_restart_status name=$process state=still_running"
 	else
-		echo "process_restart_status name=$process state=stopped_or_restart_pending"
+		log_line "process_restart_status name=$process state=stopped_or_restart_pending"
 	fi
-done >> "$LOG"
+done
 
 exit 0

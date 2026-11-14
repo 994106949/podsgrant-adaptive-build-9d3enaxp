@@ -90,12 +90,15 @@ static NSString *AAPDiagStatusSummary(NSDictionary *result) {
 
 static NSString *AAPDiagReadySummary(NSDictionary *ready) {
 	if (![ready isKindOfClass:[NSDictionary class]]) {
-		return @"helper_not_loaded";
+		return @"daemon_not_loaded";
 	}
-	NSString *status = ready[@"status"] ?: @"helper_loaded";
+	NSString *status = ready[@"status"] ?: @"daemon_unknown";
 	NSString *executable = ready[@"executable"] ?: @"?";
-	return [NSString stringWithFormat:@"%@ exe=%@ pid=%@",
+	NSString *version = ready[@"version"] ?: @"?";
+	return [NSString stringWithFormat:@"%@ source=%@ version=%@ exe=%@ pid=%@",
 		status,
+		ready[@"source"] ?: @"?",
+		version,
 		executable.lastPathComponent ?: executable,
 		ready[@"pid"] ?: @"?"];
 }
@@ -104,12 +107,13 @@ static BOOL AAPDiagResultHasProtocolACK(NSDictionary *result) {
 	return [result[@"status"] isEqualToString:@"protocol_ack"];
 }
 
-static NSDictionary *AAPDiagWaitForHelperResult(
+static NSDictionary *AAPDiagWaitForDaemonResult(
 	unsigned long long sequence,
 	NSTimeInterval timeout) {
 	NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
 	while ([deadline timeIntervalSinceNow] > 0) {
-		NSDictionary *result = AAPDiagReadHelperResult(sequence);
+		NSDictionary *result =
+			AAPDiagReadResultForSource(sequence, @"aacpdiagd");
 		if (result) {
 			return result;
 		}
@@ -150,24 +154,18 @@ static NSDictionary *AAPDiagRunCombinedTest(
 		@"native": nativeResult,
 	} mutableCopy];
 
-	NSDictionary *localResult = nil;
+	NSDictionary *daemonResult = nil;
 	if (address.length) {
-		localResult = AAPDiagRunTransportTest(address, mode);
-		combined[@"local"] = localResult;
-		AAPDiagLog(@"ui_local_result mode=%u summary=%@",
-			mode,
-			AAPDiagStatusSummary(localResult));
-	}
-
-	if (address.length && !AAPDiagResultHasProtocolACK(localResult)) {
 		BOOL posted = AAPDiagWriteHelperRequest(address, mode, sequence);
-		AAPDiagLog(@"helper_request posted=%d sequence=%llu",
+		AAPDiagLog(@"daemon_request posted=%d sequence=%llu mode=%u",
 			posted,
-			sequence);
+			sequence,
+			mode);
 		if (posted) {
-			NSDictionary *readyBefore = AAPDiagReadHelperReady();
-			combined[@"helper_ready"] = readyBefore ?: @{
-				@"status": @"helper_not_loaded",
+			NSDictionary *readyBefore =
+				AAPDiagReadReadyForSource(@"aacpdiagd");
+			combined[@"daemon_ready"] = readyBefore ?: @{
+				@"status": @"daemon_not_loaded",
 			};
 			CFNotificationCenterPostNotification(
 				CFNotificationCenterGetDarwinNotifyCenter(),
@@ -176,32 +174,35 @@ static NSDictionary *AAPDiagRunCombinedTest(
 				NULL,
 				true);
 			notify_post(AAPDiagNotifyName);
-			NSDictionary *helperResult =
-				AAPDiagWaitForHelperResult(sequence, 25.0);
-			if (!helperResult) {
-				NSDictionary *readyAfter = AAPDiagReadHelperReady();
-				combined[@"helper_ready_after"] = readyAfter ?: @{};
-				helperResult = @{
+			daemonResult = AAPDiagWaitForDaemonResult(sequence, 25.0);
+			if (!daemonResult) {
+				NSDictionary *readyAfter =
+					AAPDiagReadReadyForSource(@"aacpdiagd");
+				combined[@"daemon_ready_after"] = readyAfter ?: @{};
+				daemonResult = @{
 					@"status": readyAfter
-						? @"helper_loaded_no_reply"
-						: @"helper_not_loaded",
+						? @"daemon_loaded_no_reply"
+						: @"daemon_not_loaded",
+					@"source": @"aacpdiagd",
 				};
 			}
-			combined[@"helper"] = helperResult;
-			AAPDiagLog(@"ui_helper_result mode=%u summary=%@",
+			combined[@"daemon"] = daemonResult;
+			AAPDiagLog(@"ui_daemon_result mode=%u summary=%@",
 				mode,
-				AAPDiagStatusSummary(helperResult));
+				AAPDiagStatusSummary(daemonResult));
 		} else {
-			combined[@"helper"] = @{@"status": @"request_write_failed"};
+			combined[@"daemon"] = @{
+				@"status": @"request_write_failed",
+				@"source": @"aacpdiagd",
+			};
 		}
 	}
 
-	BOOL localACK = AAPDiagResultHasProtocolACK(localResult);
-	NSDictionary *helperResult = combined[@"helper"];
-	BOOL helperACK = AAPDiagResultHasProtocolACK(helperResult);
+	NSDictionary *daemonFinal = combined[@"daemon"];
+	BOOL daemonACK = AAPDiagResultHasProtocolACK(daemonFinal);
 	BOOL localGetterOnly =
 		[nativeResult[@"status"] isEqualToString:@"local_getter_only"];
-	combined[@"status"] = (localACK || helperACK)
+	combined[@"status"] = daemonACK
 		? @"protocol_ack"
 		: (localGetterOnly ? @"local_getter_only" : @"no_confirmation");
 
@@ -219,12 +220,11 @@ static NSDictionary *AAPDiagRunCombinedTest(
 	AAPDiagLog(@"local_getter after available=%d value=%u (not used as success)",
 		finalGetterAvailable,
 		finalGetter);
-	AAPDiagLog(@"ui_combined_result mode=%u status=%@ native=%@ local=%@ helper=%@",
+	AAPDiagLog(@"ui_combined_result mode=%u status=%@ native=%@ daemon=%@",
 		mode,
 		combined[@"status"],
 		nativeResult[@"status"] ?: @"unknown",
-		AAPDiagStatusSummary(localResult),
-		AAPDiagStatusSummary(helperResult));
+		AAPDiagStatusSummary(daemonFinal));
 	return combined;
 }
 
@@ -254,14 +254,13 @@ static void AAPDiagShowResult(BTSDeviceConfigController *controller,
 		: @{};
 	NSString *message = [NSString stringWithFormat:
 		@"Native: %@\nLocal getter (informational only): %@ -> %@\n"
-		@"Local: %@\nHelper: %@\nReady: %@\n\nLog: %@",
+		@"Daemon: %@\nReady: %@\n\nLog: %@",
 		native[@"status"] ?: @"none",
 		before[@"description"] ?: @"unavailable",
 		after[@"description"] ?: @"unavailable",
-		AAPDiagStatusSummary(result[@"local"]),
-		AAPDiagStatusSummary(result[@"helper"]),
-		AAPDiagReadySummary(result[@"helper_ready_after"] ?:
-			result[@"helper_ready"]),
+		AAPDiagStatusSummary(result[@"daemon"]),
+		AAPDiagReadySummary(result[@"daemon_ready_after"] ?:
+			result[@"daemon_ready"]),
 		AAPDiagLogPath];
 	UIAlertController *alert = [UIAlertController
 		alertControllerWithTitle:title

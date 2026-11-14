@@ -7,8 +7,7 @@ TWEAK_NAME = PodsGrantAACPDiag
 
 PodsGrantAACPDiag_FILES = Tweak.x \
 	../shared/AACPDiagCommon.m \
-	../shared/AACPDiagNative.m \
-	../shared/AACPDiagTransport.m
+	../shared/AACPDiagNative.m
 PodsGrantAACPDiag_CFLAGS = -fobjc-arc
 PodsGrantAACPDiag_FRAMEWORKS = Foundation UIKit CoreBluetooth
 

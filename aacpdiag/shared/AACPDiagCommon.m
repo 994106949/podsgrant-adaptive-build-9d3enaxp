@@ -11,6 +11,10 @@
 
 NSString *const AAPDiagLogPath =
 	@"/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.log";
+NSString *const AAPDiagFallbackLogPath =
+	@"/var/tmp/com.lns.pogr.aacpdiag/helper-boot.log";
+NSString *const AAPDiagTmpLogPath =
+	@"/tmp/com.lns.pogr.aacpdiag/helper-boot.log";
 NSString *const AAPDiagRequestPath =
 	@"/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.request.plist";
 NSString *const AAPDiagResultPath =
@@ -33,13 +37,9 @@ NSString *const AAPDiagDarwinNotification =
 	@"com.lns.pogr.aacpdiag.request";
 const char *const AAPDiagNotifyName =
 	"com.lns.pogr.aacpdiag.request.notify";
+NSString *const AAPDiagVersion = @"0.5.7~adts3diag6";
 
-void AAPDiagLog(NSString *format, ...) {
-	va_list arguments;
-	va_start(arguments, format);
-	NSString *message = [[NSString alloc] initWithFormat:format arguments:arguments];
-	va_end(arguments);
-
+static void AAPDiagAppendLine(NSString *path, NSString *message) {
 	NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
 	formatter.dateFormat = @"yyyy-MM-dd HH:mm:ss.SSS";
 	NSString *line = [NSString stringWithFormat:@"%@ pid=%d [%@] %@\n",
@@ -47,20 +47,18 @@ void AAPDiagLog(NSString *format, ...) {
 		getpid(),
 		[[NSProcessInfo processInfo] processName],
 		message ?: @""];
-	const char *mirrorValue = getenv("AACPDIAG_CONSOLE_LOG");
-	if (mirrorValue && strcmp(mirrorValue, "0") != 0) {
-		os_log_with_type(OS_LOG_DEFAULT,
-			OS_LOG_TYPE_DEFAULT,
-			"[PodsGrantAACPDiag] %{public}@",
-			line);
-	}
-
 	NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
 	if (!data) {
 		return;
 	}
 
-	int fd = open(AAPDiagLogPath.fileSystemRepresentation,
+	NSString *directory = [path stringByDeletingLastPathComponent];
+	if (directory.length) {
+		mkdir(directory.fileSystemRepresentation, 0777);
+		chmod(directory.fileSystemRepresentation, 0777);
+	}
+
+	int fd = open(path.fileSystemRepresentation,
 		O_WRONLY | O_CREAT | O_APPEND,
 		0644);
 	if (fd < 0) {
@@ -77,6 +75,63 @@ void AAPDiagLog(NSString *format, ...) {
 		remaining -= (NSUInteger)written;
 	}
 	close(fd);
+	chmod(path.fileSystemRepresentation, 0666);
+}
+
+void AAPDiagLogToPath(NSString *path, NSString *format, ...) {
+	if (!path.length) {
+		return;
+	}
+	va_list arguments;
+	va_start(arguments, format);
+	NSString *message = [[NSString alloc] initWithFormat:format arguments:arguments];
+	va_end(arguments);
+	AAPDiagAppendLine(path, message);
+}
+
+void AAPDiagLog(NSString *format, ...) {
+	va_list arguments;
+	va_start(arguments, format);
+	NSString *message = [[NSString alloc] initWithFormat:format arguments:arguments];
+	va_end(arguments);
+
+	const char *mirrorValue = getenv("AACPDIAG_CONSOLE_LOG");
+	if (mirrorValue && strcmp(mirrorValue, "0") != 0) {
+		os_log_with_type(OS_LOG_DEFAULT,
+			OS_LOG_TYPE_DEFAULT,
+			"[PodsGrantAACPDiag] %{public}@",
+			message ?: @"");
+	}
+
+	static dispatch_once_t pathsOnce;
+	static NSArray<NSString *> *paths;
+	dispatch_once(&pathsOnce, ^{
+		paths = @[
+			AAPDiagLogPath,
+			AAPDiagFallbackLogPath,
+			AAPDiagTmpLogPath,
+		];
+	});
+
+	BOOL wrote = NO;
+	for (NSString *path in paths) {
+		NSFileManager *manager = [NSFileManager defaultManager];
+		BOOL existed = [manager fileExistsAtPath:path];
+		AAPDiagAppendLine(path, message);
+		if (!existed && [manager fileExistsAtPath:path]) {
+			wrote = YES;
+		}
+		if (existed) {
+			wrote = YES;
+		}
+	}
+	if (!wrote) {
+		os_log_with_type(OS_LOG_DEFAULT,
+			OS_LOG_TYPE_ERROR,
+			"[PodsGrantAACPDiag] log unavailable paths=%{public}@ message=%{public}@",
+			paths.description,
+			message ?: @"");
+	}
 }
 
 void AAPDiagSetLogMirroring(BOOL enabled) {
@@ -96,26 +151,51 @@ static BOOL AAPDiagEnsureParentDirectory(NSString *path) {
 	return YES;
 }
 
+void AAPDiagEnsureRuntimeDirectories(void) {
+	for (NSString *directory in @[
+		@"/var/tmp/com.lns.pogr.aacpdiag",
+		@"/tmp/com.lns.pogr.aacpdiag",
+		@"/var/mobile/Library/Preferences",
+	]) {
+		mkdir(directory.fileSystemRepresentation, 0777);
+		chmod(directory.fileSystemRepresentation, 0777);
+	}
+	for (NSString *path in @[
+		AAPDiagLogPath,
+		AAPDiagFallbackLogPath,
+		AAPDiagTmpLogPath,
+	]) {
+		chmod(path.fileSystemRepresentation, 0666);
+	}
+}
+
+void AAPDiagRemoveRequestAndResultPaths(void) {
+	for (NSString *path in [AAPDiagRequestPaths()
+		arrayByAddingObjectsFromArray:AAPDiagResultPaths()]) {
+		unlink(path.fileSystemRepresentation);
+	}
+}
+
 NSArray<NSString *> *AAPDiagRequestPaths(void) {
 	return @[
-		AAPDiagRequestPath,
 		AAPDiagFallbackRequestPath,
+		AAPDiagRequestPath,
 		AAPDiagTmpRequestPath,
 	];
 }
 
 NSArray<NSString *> *AAPDiagResultPaths(void) {
 	return @[
-		AAPDiagResultPath,
 		AAPDiagFallbackResultPath,
+		AAPDiagResultPath,
 		AAPDiagTmpResultPath,
 	];
 }
 
 NSArray<NSString *> *AAPDiagReadyPaths(void) {
 	return @[
-		AAPDiagReadyPath,
 		AAPDiagFallbackReadyPath,
+		AAPDiagReadyPath,
 		AAPDiagTmpReadyPath,
 	];
 }
@@ -253,8 +333,9 @@ BOOL AAPDiagWriteHelperRequest(NSString *address,
 	return written;
 }
 
-NSDictionary<NSString *, id> *AAPDiagReadHelperResult(
-	unsigned long long sequence) {
+NSDictionary<NSString *, id> *AAPDiagReadResultForSource(
+	unsigned long long sequence,
+	NSString *source) {
 	for (NSString *path in AAPDiagResultPaths()) {
 		NSData *data = [NSData dataWithContentsOfFile:path];
 		if (!data.length) {
@@ -269,11 +350,23 @@ NSDictionary<NSString *, id> *AAPDiagReadHelperResult(
 			continue;
 		}
 		NSDictionary *result = plist;
-		if ([result[@"sequence"] unsignedLongLongValue] == sequence) {
+		if ([result[@"sequence"] unsignedLongLongValue] != sequence) {
+			continue;
+		}
+		if (source.length &&
+			![result[@"source"] isEqual:source]) {
+			continue;
+		}
+		if (result) {
 			return result;
 		}
 	}
 	return nil;
+}
+
+NSDictionary<NSString *, id> *AAPDiagReadHelperResult(
+	unsigned long long sequence) {
+	return AAPDiagReadResultForSource(sequence, nil);
 }
 
 BOOL AAPDiagWritePlistToPaths(NSDictionary<NSString *, id> *plist,
@@ -322,7 +415,7 @@ BOOL AAPDiagWriteHelperReady(NSDictionary<NSString *, id> *ready) {
 	return written;
 }
 
-NSDictionary<NSString *, id> *AAPDiagReadHelperReady(void) {
+NSDictionary<NSString *, id> *AAPDiagReadReadyForSource(NSString *source) {
 	NSDictionary *latest = nil;
 	double latestTime = 0;
 	for (NSString *path in AAPDiagReadyPaths()) {
@@ -339,6 +432,10 @@ NSDictionary<NSString *, id> *AAPDiagReadHelperReady(void) {
 			continue;
 		}
 		NSDictionary *candidate = plist;
+		if (source.length &&
+			![candidate[@"source"] isEqual:source]) {
+			continue;
+		}
 		double updated = [candidate[@"updated"] doubleValue];
 		if (!latest || updated > latestTime) {
 			latest = candidate;
@@ -346,4 +443,8 @@ NSDictionary<NSString *, id> *AAPDiagReadHelperReady(void) {
 		}
 	}
 	return latest;
+}
+
+NSDictionary<NSString *, id> *AAPDiagReadHelperReady(void) {
+	return AAPDiagReadReadyForSource(nil);
 }

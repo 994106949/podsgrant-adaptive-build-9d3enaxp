@@ -1,4 +1,4 @@
-# PodsGrant AACP Diagnostics 0.5.7 diag5
+# PodsGrant AACP Diagnostics 0.5.7 diag6
 
 Independent RootHide package for testing AirPods AACP listening-mode frames.
 
@@ -18,10 +18,40 @@ Getter readback is informational only. A non-matching reply is reported as
 An ACK is not evidence of the audible result. Adaptive mode `0x0D 04` is tested
 only after the earbuds answer ANC and Transparency.
 
-Both `bluetoothd` and `heard` run the AACP request poller in diag5. Each result
-records which process handled the request, the socket layout, TX bytes and RX
-bytes. The install script also records the package file list, candidate
-RootHide dylib paths and process restart status.
+In diag6, the root LaunchDaemon `com.lns.pogr.aacpdiagd` is the sole AACP
+transport consumer. It reads requests from the shared request plists, opens the
+L2CAP socket as root, records TX/RX packets, and writes results tagged with
+`source=aacpdiagd`. The injected helper records runtime-hook readiness; the
+Settings UI accepts success only from a daemon result with
+`status=protocol_ack`.
+
+The install script records the package file list, candidate RootHide dylib
+paths, daemon bootstrap status and process restart status.
+
+Primary log:
+
+```text
+/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.log
+```
+
+Fallback logs:
+
+```text
+/var/tmp/com.lns.pogr.aacpdiag/helper-boot.log
+/tmp/com.lns.pogr.aacpdiag/helper-boot.log
+```
+
+For a useful test, wait for these daemon markers before choosing a mode:
+
+```text
+helper_loaded source=aacpdiagd
+helper_watchdog source=aacpdiagd
+request_received
+helper_transport_start
+socket_tx
+earbud_rx
+protocol_ack
+```
 
 Start with a fresh log, connect the AirPods, manually switch between ANC and
 Transparency once, then run the three AACP diagnostics.
