@@ -2,6 +2,13 @@
 
 rm -f /var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.request.plist
 rm -f /var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result.plist
+rm -f /var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper.plist
+rm -f /var/tmp/com.lns.pogr.aacpdiag/request.plist
+rm -f /var/tmp/com.lns.pogr.aacpdiag/result.plist
+rm -f /var/tmp/com.lns.pogr.aacpdiag/helper.plist
+rm -f /tmp/com.lns.pogr.aacpdiag/request.plist
+rm -f /tmp/com.lns.pogr.aacpdiag/result.plist
+rm -f /tmp/com.lns.pogr.aacpdiag/helper.plist
 killall -TERM Preferences 2>/dev/null || true
 killall -TERM bluetoothd 2>/dev/null || true
 killall -TERM heard 2>/dev/null || true

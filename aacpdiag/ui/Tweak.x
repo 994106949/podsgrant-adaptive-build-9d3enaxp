@@ -2,6 +2,7 @@
 #import <UIKit/UIKit.h>
 
 #import <objc/runtime.h>
+#import <notify.h>
 #import <unistd.h>
 
 #import "../shared/AACPDiag.h"
@@ -87,6 +88,18 @@ static NSString *AAPDiagStatusSummary(NSDictionary *result) {
 		AAPDiagFirstPacket(result)];
 }
 
+static NSString *AAPDiagReadySummary(NSDictionary *ready) {
+	if (![ready isKindOfClass:[NSDictionary class]]) {
+		return @"helper_not_loaded";
+	}
+	NSString *status = ready[@"status"] ?: @"helper_loaded";
+	NSString *executable = ready[@"executable"] ?: @"?";
+	return [NSString stringWithFormat:@"%@ exe=%@ pid=%@",
+		status,
+		executable.lastPathComponent ?: executable,
+		ready[@"pid"] ?: @"?"];
+}
+
 static BOOL AAPDiagResultHasProtocolACK(NSDictionary *result) {
 	return [result[@"status"] isEqualToString:@"protocol_ack"];
 }
@@ -152,17 +165,29 @@ static NSDictionary *AAPDiagRunCombinedTest(
 			posted,
 			sequence);
 		if (posted) {
+			NSDictionary *readyBefore = AAPDiagReadHelperReady();
+			combined[@"helper_ready"] = readyBefore ?: @{
+				@"status": @"helper_not_loaded",
+			};
 			CFNotificationCenterPostNotification(
 				CFNotificationCenterGetDarwinNotifyCenter(),
 				(__bridge CFStringRef)AAPDiagDarwinNotification,
 				NULL,
 				NULL,
 				true);
+			notify_post(AAPDiagNotifyName);
 			NSDictionary *helperResult =
-				AAPDiagWaitForHelperResult(sequence, 20.0);
-			combined[@"helper"] = helperResult ?: @{
-				@"status": @"helper_timeout",
-			};
+				AAPDiagWaitForHelperResult(sequence, 25.0);
+			if (!helperResult) {
+				NSDictionary *readyAfter = AAPDiagReadHelperReady();
+				combined[@"helper_ready_after"] = readyAfter ?: @{};
+				helperResult = @{
+					@"status": readyAfter
+						? @"helper_loaded_no_reply"
+						: @"helper_not_loaded",
+				};
+			}
+			combined[@"helper"] = helperResult;
 			AAPDiagLog(@"ui_helper_result mode=%u summary=%@",
 				mode,
 				AAPDiagStatusSummary(helperResult));
@@ -229,12 +254,14 @@ static void AAPDiagShowResult(BTSDeviceConfigController *controller,
 		: @{};
 	NSString *message = [NSString stringWithFormat:
 		@"Native: %@\nLocal getter (informational only): %@ -> %@\n"
-		@"Local: %@\nHelper: %@\n\nLog: %@",
+		@"Local: %@\nHelper: %@\nReady: %@\n\nLog: %@",
 		native[@"status"] ?: @"none",
 		before[@"description"] ?: @"unavailable",
 		after[@"description"] ?: @"unavailable",
 		AAPDiagStatusSummary(result[@"local"]),
 		AAPDiagStatusSummary(result[@"helper"]),
+		AAPDiagReadySummary(result[@"helper_ready_after"] ?:
+			result[@"helper_ready"]),
 		AAPDiagLogPath];
 	UIAlertController *alert = [UIAlertController
 		alertControllerWithTitle:title

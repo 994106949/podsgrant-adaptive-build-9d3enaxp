@@ -124,7 +124,7 @@ def main() -> int:
     control = read_control(members)
     if control.get("Package") != "com.lns.pogr.aacpdiag":
         raise ValueError(f"unexpected Package: {control.get('Package')!r}")
-    if control.get("Version") != "0.5.7~adts3diag3":
+    if control.get("Version") != "0.5.7~adts3diag4":
         raise ValueError(f"unexpected Version: {control.get('Version')!r}")
 
     payload_name, archive = read_payload(members)
@@ -182,6 +182,10 @@ def main() -> int:
         helper_filter.get("Filter", {}).get("Executables", [])
     ):
         raise ValueError("helper filter is missing bluetoothd")
+    if "heard" not in (
+        helper_filter.get("Filter", {}).get("Executables", [])
+    ):
+        raise ValueError("helper filter is missing heard")
     if any(name.startswith("var/jb/") for name in files):
         raise ValueError("unexpected rootless var/jb payload")
 

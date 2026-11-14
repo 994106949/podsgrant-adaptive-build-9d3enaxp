@@ -1,6 +1,9 @@
 #import "AACPDiag.h"
 
+#import <errno.h>
 #import <fcntl.h>
+#import <notify.h>
+#import <os/log.h>
 #import <stdarg.h>
 #import <string.h>
 #import <sys/stat.h>
@@ -12,8 +15,24 @@ NSString *const AAPDiagRequestPath =
 	@"/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.request.plist";
 NSString *const AAPDiagResultPath =
 	@"/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result.plist";
+NSString *const AAPDiagFallbackRequestPath =
+	@"/var/tmp/com.lns.pogr.aacpdiag/request.plist";
+NSString *const AAPDiagFallbackResultPath =
+	@"/var/tmp/com.lns.pogr.aacpdiag/result.plist";
+NSString *const AAPDiagTmpRequestPath =
+	@"/tmp/com.lns.pogr.aacpdiag/request.plist";
+NSString *const AAPDiagTmpResultPath =
+	@"/tmp/com.lns.pogr.aacpdiag/result.plist";
+NSString *const AAPDiagReadyPath =
+	@"/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper.plist";
+NSString *const AAPDiagFallbackReadyPath =
+	@"/var/tmp/com.lns.pogr.aacpdiag/helper.plist";
+NSString *const AAPDiagTmpReadyPath =
+	@"/tmp/com.lns.pogr.aacpdiag/helper.plist";
 NSString *const AAPDiagDarwinNotification =
 	@"com.lns.pogr.aacpdiag.request";
+NSString *const AAPDiagNotifyName =
+	"com.lns.pogr.aacpdiag.request.notify";
 
 void AAPDiagLog(NSString *format, ...) {
 	va_list arguments;
@@ -28,6 +47,14 @@ void AAPDiagLog(NSString *format, ...) {
 		getpid(),
 		[[NSProcessInfo processInfo] processName],
 		message ?: @""];
+	const char *mirrorValue = getenv("AACPDIAG_CONSOLE_LOG");
+	if (mirrorValue && strcmp(mirrorValue, "0") != 0) {
+		os_log_with_type(OS_LOG_DEFAULT,
+			OS_LOG_TYPE_DEFAULT,
+			"[PodsGrantAACPDiag] %{public}@",
+			line);
+	}
+
 	NSData *data = [line dataUsingEncoding:NSUTF8StringEncoding];
 	if (!data) {
 		return;
@@ -50,6 +77,47 @@ void AAPDiagLog(NSString *format, ...) {
 		remaining -= (NSUInteger)written;
 	}
 	close(fd);
+}
+
+void AAPDiagSetLogMirroring(BOOL enabled) {
+	setenv("AACPDIAG_CONSOLE_LOG", enabled ? "1" : "0", 0);
+}
+
+static BOOL AAPDiagEnsureParentDirectory(NSString *path) {
+	NSString *directory = [path stringByDeletingLastPathComponent];
+	if (!directory.length) {
+		return NO;
+	}
+	if (mkdir(directory.fileSystemRepresentation, 0777) != 0 &&
+		errno != EEXIST) {
+		return NO;
+	}
+	chmod(directory.fileSystemRepresentation, 0777);
+	return YES;
+}
+
+NSArray<NSString *> *AAPDiagRequestPaths(void) {
+	return @[
+		AAPDiagRequestPath,
+		AAPDiagFallbackRequestPath,
+		AAPDiagTmpRequestPath,
+	];
+}
+
+NSArray<NSString *> *AAPDiagResultPaths(void) {
+	return @[
+		AAPDiagResultPath,
+		AAPDiagFallbackResultPath,
+		AAPDiagTmpResultPath,
+	];
+}
+
+NSArray<NSString *> *AAPDiagReadyPaths(void) {
+	return @[
+		AAPDiagReadyPath,
+		AAPDiagFallbackReadyPath,
+		AAPDiagTmpReadyPath,
+	];
 }
 
 NSString *AAPDiagNormalizeAddress(NSString *address) {
@@ -168,33 +236,114 @@ BOOL AAPDiagWriteHelperRequest(NSString *address,
 	if (!data) {
 		return NO;
 	}
-	unlink(AAPDiagRequestPath.fileSystemRepresentation);
-	BOOL written = [data writeToFile:AAPDiagRequestPath
-		options:NSDataWritingAtomic
-		error:nil];
-	if (written) {
-		chmod(AAPDiagRequestPath.fileSystemRepresentation, 0644);
+	BOOL written = NO;
+	for (NSString *path in AAPDiagRequestPaths()) {
+		AAPDiagEnsureParentDirectory(path);
+		unlink(path.fileSystemRepresentation);
+		BOOL current = [data writeToFile:path
+			options:NSDataWritingAtomic
+			error:nil];
+		if (current) {
+			chmod(path.fileSystemRepresentation, 0666);
+			written = YES;
+		} else {
+			AAPDiagLog(@"helper request write failed path=%@", path);
+		}
 	}
 	return written;
 }
 
 NSDictionary<NSString *, id> *AAPDiagReadHelperResult(
 	unsigned long long sequence) {
-	NSData *data = [NSData dataWithContentsOfFile:AAPDiagResultPath];
-	if (!data.length) {
-		return nil;
+	for (NSString *path in AAPDiagResultPaths()) {
+		NSData *data = [NSData dataWithContentsOfFile:path];
+		if (!data.length) {
+			continue;
+		}
+		id plist = [NSPropertyListSerialization
+			propertyListWithData:data
+			options:NSPropertyListImmutable
+			format:nil
+			error:nil];
+		if (![plist isKindOfClass:[NSDictionary class]]) {
+			continue;
+		}
+		NSDictionary *result = plist;
+		if ([result[@"sequence"] unsignedLongLongValue] == sequence) {
+			return result;
+		}
 	}
-	id plist = [NSPropertyListSerialization
-		propertyListWithData:data
-		options:NSPropertyListImmutable
-		format:nil
+	return nil;
+}
+
+BOOL AAPDiagWritePlistToPaths(NSDictionary<NSString *, id> *plist,
+	NSArray<NSString *> *paths) {
+	NSData *data = [NSPropertyListSerialization
+		dataWithPropertyList:plist
+		format:NSPropertyListBinaryFormat_v1_0
+		options:0
 		error:nil];
-	if (![plist isKindOfClass:[NSDictionary class]]) {
-		return nil;
+	if (!data) {
+		return NO;
 	}
-	NSDictionary *result = plist;
-	if ([result[@"sequence"] unsignedLongLongValue] != sequence) {
-		return nil;
+	BOOL written = NO;
+	for (NSString *path in paths) {
+		if (!AAPDiagEnsureParentDirectory(path)) {
+			AAPDiagLog(@"plist directory unavailable path=%@", path);
+			continue;
+		}
+		BOOL current = [data writeToFile:path
+			options:NSDataWritingAtomic
+			error:nil];
+		if (current) {
+			chmod(path.fileSystemRepresentation, 0666);
+			written = YES;
+		} else {
+			AAPDiagLog(@"plist write failed path=%@", path);
+		}
 	}
-	return result;
+	return written;
+}
+
+BOOL AAPDiagWriteHelperReady(NSDictionary<NSString *, id> *ready) {
+	NSMutableDictionary *payload = [ready mutableCopy] ?: [NSMutableDictionary dictionary];
+	payload[@"pid"] = @(getpid());
+	payload[@"updated"] = @([[NSDate date] timeIntervalSince1970]);
+	BOOL written = AAPDiagWritePlistToPaths(payload, AAPDiagReadyPaths());
+	int token = 0;
+	if (notify_register_check(AAPDiagNotifyName, &token) == NOTIFY_STATUS_OK) {
+		uint64_t state = payload[@"sequence"]
+			? [payload[@"sequence"] unsignedLongLongValue]
+			: 1;
+		notify_set_state(token, state);
+		notify_cancel(token);
+	}
+	notify_post(AAPDiagNotifyName);
+	return written;
+}
+
+NSDictionary<NSString *, id> *AAPDiagReadHelperReady(void) {
+	NSDictionary *latest = nil;
+	double latestTime = 0;
+	for (NSString *path in AAPDiagReadyPaths()) {
+		NSData *data = [NSData dataWithContentsOfFile:path];
+		if (!data.length) {
+			continue;
+		}
+		id plist = [NSPropertyListSerialization
+			propertyListWithData:data
+			options:NSPropertyListImmutable
+			format:nil
+			error:nil];
+		if (![plist isKindOfClass:[NSDictionary class]]) {
+			continue;
+		}
+		NSDictionary *candidate = plist;
+		double updated = [candidate[@"updated"] doubleValue];
+		if (!latest || updated > latestTime) {
+			latest = candidate;
+			latestTime = updated;
+		}
+	}
+	return latest;
 }

@@ -1,38 +1,35 @@
 #import <Foundation/Foundation.h>
 
 #import <mach-o/dyld.h>
+#import <notify.h>
+#import <os/log.h>
 #import <string.h>
 #import <sys/stat.h>
 
 #import "../shared/AACPDiag.h"
 
 static void AAPDiagWriteResult(NSDictionary<NSString *, id> *result) {
-	NSData *data = [NSPropertyListSerialization
-		dataWithPropertyList:result
-		format:NSPropertyListBinaryFormat_v1_0
-		options:0
-		error:nil];
-	if (!data) {
-		AAPDiagLog(@"helper result serialization failed");
-		return;
-	}
-	BOOL written = [data writeToFile:AAPDiagResultPath
-		options:NSDataWritingAtomic
-		error:nil];
-	if (written) {
-		chmod(AAPDiagResultPath.fileSystemRepresentation, 0644);
-	}
+	BOOL written = AAPDiagWritePlistToPaths(result, AAPDiagResultPaths());
 	AAPDiagLog(@"helper result_write=%d sequence=%llu status=%@",
 		written,
 		[result[@"sequence"] unsignedLongLongValue],
 		result[@"status"] ?: @"unknown");
+	notify_post(AAPDiagNotifyName);
 }
 
 static void AAPDiagHandleRequest(void) {
 	@autoreleasepool {
-		NSData *data = [NSData dataWithContentsOfFile:AAPDiagRequestPath];
+		NSData *data = nil;
+		NSString *requestPath = nil;
+		for (NSString *path in AAPDiagRequestPaths()) {
+			NSData *candidate = [NSData dataWithContentsOfFile:path];
+			if (candidate.length) {
+				data = candidate;
+				requestPath = path;
+				break;
+			}
+		}
 		if (!data.length) {
-			AAPDiagLog(@"helper request missing path=%@", AAPDiagRequestPath);
 			return;
 		}
 		id plist = [NSPropertyListSerialization
@@ -41,7 +38,7 @@ static void AAPDiagHandleRequest(void) {
 			format:nil
 			error:nil];
 		if (![plist isKindOfClass:[NSDictionary class]]) {
-			AAPDiagLog(@"helper request plist invalid");
+			AAPDiagLog(@"helper request plist invalid path=%@", requestPath);
 			return;
 		}
 
@@ -54,6 +51,7 @@ static void AAPDiagHandleRequest(void) {
 			sequence,
 			address ?: @"nil",
 			mode);
+		AAPDiagLog(@"helper request_path=%@", requestPath);
 		AAPDiagLog(@"diag_marker source=helper event=request_received "
 			@"sequence=%llu address=%@ mode=%u",
 			sequence,
@@ -67,7 +65,39 @@ static void AAPDiagHandleRequest(void) {
 		NSMutableDictionary *result = [transport mutableCopy];
 		result[@"sequence"] = @(sequence);
 		result[@"source"] = @"bluetoothd";
+		result[@"request_path"] = requestPath ?: @"";
 		AAPDiagWriteResult(result);
+	}
+}
+
+static void AAPDiagPollRequests(void) {
+	static unsigned long long lastSequence;
+	@autoreleasepool {
+		for (NSString *path in AAPDiagRequestPaths()) {
+			NSData *data = [NSData dataWithContentsOfFile:path];
+			if (!data.length) {
+				continue;
+			}
+			id plist = [NSPropertyListSerialization
+				propertyListWithData:data
+				options:NSPropertyListImmutable
+				format:nil
+				error:nil];
+			if (![plist isKindOfClass:[NSDictionary class]]) {
+				continue;
+			}
+			unsigned long long sequence =
+				[plist[@"sequence"] unsignedLongLongValue];
+			if (sequence == lastSequence) {
+				continue;
+			}
+			lastSequence = sequence;
+			AAPDiagLog(@"helper_poll picked sequence=%llu path=%@",
+				sequence,
+				path);
+			AAPDiagHandleRequest();
+			return;
+		}
 	}
 }
 
@@ -83,19 +113,93 @@ static void AAPDiagDarwinCallback(CFNotificationCenterRef center,
 	(void)userInfo;
 	dispatch_async(
 		dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
-			AAPDiagHandleRequest();
+			AAPDiagPollRequests();
 		});
+}
+
+static void AAPDiagNotifyCallback(int token) {
+	(void)token;
+	dispatch_async(
+		dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0), ^{
+			AAPDiagPollRequests();
+		});
+}
+
+static void AAPDiagStartWatchdog(void) {
+	static dispatch_once_t onceToken;
+	dispatch_once(&onceToken, ^{
+		dispatch_queue_t queue = dispatch_queue_create(
+			"com.lns.pogr.aacpdiag.helper-watchdog",
+			DISPATCH_QUEUE_SERIAL);
+		dispatch_source_t timer = dispatch_source_create(
+			DISPATCH_SOURCE_TYPE_TIMER,
+			0,
+			0,
+			queue);
+		uint64_t interval = 250ULL * NSEC_PER_MSEC;
+		dispatch_source_set_timer(timer,
+			dispatch_time(DISPATCH_TIME_NOW, (int64_t)interval),
+			interval,
+			50ULL * NSEC_PER_MSEC);
+		dispatch_source_set_event_handler(timer, ^{
+			AAPDiagPollRequests();
+		});
+		dispatch_resume(timer);
+
+		int token = 0;
+		notify_register_dispatch(
+			AAPDiagNotifyName,
+			&token,
+			dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+			^(int notifiedToken) {
+				AAPDiagNotifyCallback(notifiedToken);
+			});
+		AAPDiagLog(@"helper_watchdog started interval_ms=250");
+	});
 }
 
 %ctor {
 	char executablePath[1024] = {0};
 	uint32_t length = sizeof(executablePath);
 	_NSGetExecutablePath(executablePath, &length);
-	if (!strstr(executablePath, "bluetoothd")) {
+	NSString *executable = executablePath[0]
+		? [NSString stringWithUTF8String:executablePath]
+		: @"unknown";
+	NSString *processName = NSProcessInfo.processInfo.processName ?: @"";
+	AAPDiagSetLogMirroring(YES);
+	AAPDiagLog(@"diag_marker source=helper event=dylib_ctor "
+		@"executable=%@ process=%@ pid=%d",
+		executable,
+		processName,
+		getpid());
+
+	BOOL isBluetoothd =
+		strstr(executablePath, "bluetoothd") != NULL ||
+		[processName isEqualToString:@"bluetoothd"];
+	BOOL isHeard =
+		strstr(executablePath, "heard") != NULL ||
+		[processName isEqualToString:@"heard"];
+	if (!isBluetoothd && !isHeard) {
+		AAPDiagLog(@"helper_ctor_skip executable=%@ process=%@",
+			executable,
+			processName);
 		return;
 	}
 
-	AAPDiagLog(@"helper_loaded executable=%s", executablePath);
+	AAPDiagWriteHelperReady(@{
+		@"status": @"helper_loaded",
+		@"executable": executable,
+		@"is_bluetoothd": @(isBluetoothd),
+		@"is_heard": @(isHeard),
+		@"version": @"0.5.7~adts3diag4",
+	});
+	AAPDiagLog(@"helper_loaded executable=%@ process=%@",
+		executable,
+		processName);
+	if (!isBluetoothd) {
+		return;
+	}
+
 	AAPDiagInstallRuntimeHooks();
 	CFNotificationCenterAddObserver(
 		CFNotificationCenterGetDarwinNotifyCenter(),
@@ -104,4 +208,12 @@ static void AAPDiagDarwinCallback(CFNotificationCenterRef center,
 		(__bridge CFStringRef)AAPDiagDarwinNotification,
 		NULL,
 		CFNotificationSuspensionBehaviorDeliverImmediately);
+	AAPDiagStartWatchdog();
+	AAPDiagWriteHelperReady(@{
+		@"status": @"helper_ready",
+		@"executable": executable,
+		@"is_bluetoothd": @(isBluetoothd),
+		@"is_heard": @(isHeard),
+		@"version": @"0.5.7~adts3diag4",
+	});
 }
