@@ -177,6 +177,35 @@ static id AAPDiagInvokeObjectGetter(id target, NSString *name) {
 	return value;
 }
 
+static id AAPDiagInvokeClassGetter(Class cls, NSString *name) {
+	if (!cls || !name.length) {
+		return nil;
+	}
+	SEL selector = NSSelectorFromString(name);
+	if (![(id)cls respondsToSelector:selector]) {
+		return nil;
+	}
+	NSMethodSignature *signature =
+		[(id)cls methodSignatureForSelector:selector];
+	if (!signature || signature.numberOfArguments != 2 ||
+		signature.methodReturnLength == 0 ||
+		signature.methodReturnType[0] != '@') {
+		return nil;
+	}
+	NSInvocation *invocation =
+		[NSInvocation invocationWithMethodSignature:signature];
+	invocation.target = (id)cls;
+	invocation.selector = selector;
+	@try {
+		[invocation invoke];
+	} @catch (__unused NSException *exception) {
+		return nil;
+	}
+	__unsafe_unretained id value = nil;
+	[invocation getReturnValue:&value];
+	return value;
+}
+
 static NSString *AAPDiagObjectAddress(id object, NSUInteger depth) {
 	if (!object || depth > 3) {
 		return nil;
@@ -785,18 +814,13 @@ NSArray *AAPDiagDiscoverDeviceCandidates(NSString *expectedAddress) {
 	}
 	Class managerClass = objc_getClass("BluetoothManager");
 	if (managerClass) {
-		id manager = nil;
-		@try {
-			manager = [managerClass sharedInstance];
-		} @catch (__unused NSException *exception) {
-			manager = nil;
-		}
+		id manager = AAPDiagInvokeClassGetter(
+			managerClass,
+			@"sharedInstance");
 		if (!manager) {
-			@try {
-				manager = [managerClass defaultInstance];
-			} @catch (__unused NSException *exception) {
-				manager = nil;
-			}
+			manager = AAPDiagInvokeClassGetter(
+				managerClass,
+				@"defaultInstance");
 		}
 		AAPDiagAddCandidateAndNestedObjects(manager, all, seen, 0);
 		for (NSString *name in @[
