@@ -31,7 +31,7 @@ NSString *const AAPDiagTmpReadyPath =
 	@"/tmp/com.lns.pogr.aacpdiag/helper.plist";
 NSString *const AAPDiagDarwinNotification =
 	@"com.lns.pogr.aacpdiag.request";
-NSString *const AAPDiagNotifyName =
+const char *const AAPDiagNotifyName =
 	"com.lns.pogr.aacpdiag.request.notify";
 
 void AAPDiagLog(NSString *format, ...) {

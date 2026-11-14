@@ -13,7 +13,7 @@ extern NSString *const AAPDiagReadyPath;
 extern NSString *const AAPDiagFallbackReadyPath;
 extern NSString *const AAPDiagTmpReadyPath;
 extern NSString *const AAPDiagDarwinNotification;
-extern NSString *const AAPDiagNotifyName;
+extern const char *const AAPDiagNotifyName;
 
 typedef NS_ENUM(unsigned int, AAPDiagMode) {
 	AAPDiagModeNoiseCancellation = 2,
