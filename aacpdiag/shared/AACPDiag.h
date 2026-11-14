@@ -48,6 +48,14 @@ NSDictionary<NSString *, id> *AAPDiagRunNativeTestOnCandidates(
 void AAPDiagLogClassInventory(NSString *scope, id _Nullable object);
 void AAPDiagInstallRuntimeHooks(void);
 
+int AAPDiagCopyActiveAACPDescriptorWithMatch(
+	NSString *address,
+	BOOL *addressMatched);
+NSArray<NSDictionary<NSString *, id> *> *
+	AAPDiagCopyAACPRXFramesForDescriptor(
+		int fd,
+		uint64_t sinceMicroseconds);
+
 BOOL AAPDiagWriteHelperRequest(NSString *address,
 	unsigned int mode,
 	unsigned long long sequence);

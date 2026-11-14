@@ -13,19 +13,15 @@ rm -f \
 	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result.plist \
 	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper.plist \
 	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result-bluetoothd.plist \
-	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result-heard.plist \
 	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result-aacpdiagd.plist \
 	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper-bluetoothd.plist \
-	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper-heard.plist \
 	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper-aacpdiagd.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/request.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/result.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/helper.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/result-bluetoothd.plist \
-	/var/tmp/com.lns.pogr.aacpdiag/result-heard.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/result-aacpdiagd.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/helper-bluetoothd.plist \
-	/var/tmp/com.lns.pogr.aacpdiag/helper-heard.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/helper-aacpdiagd.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/claim-* \
 	/var/tmp/com.lns.pogr.aacpdiag/helper-boot.log \
@@ -35,10 +31,8 @@ rm -f \
 	/tmp/com.lns.pogr.aacpdiag/result.plist \
 	/tmp/com.lns.pogr.aacpdiag/helper.plist \
 	/tmp/com.lns.pogr.aacpdiag/result-bluetoothd.plist \
-	/tmp/com.lns.pogr.aacpdiag/result-heard.plist \
 	/tmp/com.lns.pogr.aacpdiag/result-aacpdiagd.plist \
 	/tmp/com.lns.pogr.aacpdiag/helper-bluetoothd.plist \
-	/tmp/com.lns.pogr.aacpdiag/helper-heard.plist \
 	/tmp/com.lns.pogr.aacpdiag/helper-aacpdiagd.plist \
 	/tmp/com.lns.pogr.aacpdiag/claim-* \
 	/tmp/com.lns.pogr.aacpdiag/helper-boot.log
@@ -46,6 +40,5 @@ rm -f \
 rmdir /var/tmp/com.lns.pogr.aacpdiag /tmp/com.lns.pogr.aacpdiag 2>/dev/null || true
 killall -TERM Preferences 2>/dev/null || true
 killall -TERM bluetoothd 2>/dev/null || true
-killall -TERM heard 2>/dev/null || true
 
 exit 0

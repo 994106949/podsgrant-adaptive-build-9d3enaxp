@@ -39,7 +39,7 @@ NSString *const AAPDiagDarwinNotification =
 	@"com.lns.pogr.aacpdiag.request";
 const char *const AAPDiagNotifyName =
 	"com.lns.pogr.aacpdiag.request.notify";
-NSString *const AAPDiagVersion = @"0.5.8~adts3diag9";
+NSString *const AAPDiagVersion = @"0.5.8~adts3diag10";
 
 static void AAPDiagAppendLine(NSString *path, NSString *message) {
 	NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
@@ -232,7 +232,7 @@ static NSArray<NSString *> *AAPDiagResultPathsForSource(NSString *source) {
 NSArray<NSString *> *AAPDiagResultPaths(void) {
 	NSMutableArray<NSString *> *paths =
 		[AAPDiagBaseResultPaths() mutableCopy];
-	for (NSString *source in @[@"bluetoothd", @"heard", @"aacpdiagd"]) {
+	for (NSString *source in @[@"bluetoothd", @"aacpdiagd"]) {
 		[paths addObjectsFromArray:AAPDiagResultPathsForSource(source)];
 	}
 	return paths;
@@ -265,7 +265,7 @@ static NSArray<NSString *> *AAPDiagReadyPathsForSource(NSString *source) {
 NSArray<NSString *> *AAPDiagReadyPaths(void) {
 	NSMutableArray<NSString *> *paths =
 		[AAPDiagBaseReadyPaths() mutableCopy];
-	for (NSString *source in @[@"bluetoothd", @"heard", @"aacpdiagd"]) {
+	for (NSString *source in @[@"bluetoothd", @"aacpdiagd"]) {
 		[paths addObjectsFromArray:AAPDiagReadyPathsForSource(source)];
 	}
 	return paths;
@@ -278,6 +278,8 @@ NSString *AAPDiagNormalizeAddress(NSString *address) {
 	NSString *normalized = [address
 		stringByTrimmingCharactersInSet:
 			[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	normalized = [normalized
+		stringByReplacingOccurrencesOfString:@"-" withString:@":"];
 	return normalized.length ? normalized.uppercaseString : nil;
 }
 

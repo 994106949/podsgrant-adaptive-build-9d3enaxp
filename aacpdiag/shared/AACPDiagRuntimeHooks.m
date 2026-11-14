@@ -22,23 +22,54 @@ typedef int (*AAPDiagSocketFunction)(int, int, int);
 typedef int (*AAPDiagConnectFunction)(int, const struct sockaddr *, socklen_t);
 typedef ssize_t (*AAPDiagSendFunction)(int, const void *, size_t, int);
 typedef ssize_t (*AAPDiagRecvFunction)(int, void *, size_t, int);
+typedef ssize_t (*AAPDiagRecvFromFunction)(int,
+	void *,
+	size_t,
+	int,
+	struct sockaddr *,
+	socklen_t *);
+typedef ssize_t (*AAPDiagReadFunction)(int, void *, size_t);
 typedef int (*AAPDiagCloseFunction)(int);
 
 static AAPDiagSocketFunction AAPDiagOriginalSocket;
 static AAPDiagConnectFunction AAPDiagOriginalConnect;
 static AAPDiagSendFunction AAPDiagOriginalSend;
 static AAPDiagRecvFunction AAPDiagOriginalRecv;
+static AAPDiagRecvFromFunction AAPDiagOriginalRecvFrom;
+static AAPDiagReadFunction AAPDiagOriginalRead;
 static AAPDiagCloseFunction AAPDiagOriginalClose;
 
 typedef struct {
 	int fd;
 	BOOL bluetooth;
 	BOOL aacp;
+	char address[18];
+	BOOL connected;
+	uint64_t connectedAt;
+	uint64_t lastTX;
+	uint64_t lastRX;
 } AAPDiagSocketState;
 
 static AAPDiagSocketState AAPDiagSockets[AAP_DIAG_TRACKED_FDS];
 static pthread_mutex_t AAPDiagSocketLock = PTHREAD_MUTEX_INITIALIZER;
 static dispatch_queue_t AAPDiagSocketLogQueue;
+
+#define AAP_DIAG_RX_FRAMES 64
+#define AAP_DIAG_RX_BYTES 256
+#define AAP_DIAG_ACTIVE_FD_WINDOW_US 30000000ULL
+
+typedef struct {
+	int fd;
+	uint64_t timestamp;
+	char address[18];
+	size_t length;
+	uint8_t bytes[AAP_DIAG_RX_BYTES];
+} AAPDiagRXFrame;
+
+static AAPDiagRXFrame AAPDiagRXFrames[AAP_DIAG_RX_FRAMES];
+static size_t AAPDiagRXFrameCursor;
+static size_t AAPDiagRXFrameCount;
+static pthread_mutex_t AAPDiagRXLock = PTHREAD_MUTEX_INITIALIZER;
 
 typedef uintptr_t (*AAPDiagGenericMethodOriginal)(id,
 	SEL,
@@ -71,7 +102,6 @@ static const char *const AAPDiagWatchedClasses[] = {
 	"BTSDeviceConfigController",
 	"BTSDeviceClassic",
 	"BTSDevice",
-	"HeardController",
 	"AudioAccessoryManager",
 };
 
@@ -142,6 +172,44 @@ static int AAPDiagFindSocketLocked(int fd) {
 	return -1;
 }
 
+static void AAPDiagSetSocketAddressLocked(AAPDiagSocketState *state,
+	const uint8_t address[6]) {
+	if (!state || !address) {
+		return;
+	}
+	snprintf(state->address,
+		sizeof(state->address),
+		"%02X:%02X:%02X:%02X:%02X:%02X",
+		address[0],
+		address[1],
+		address[2],
+		address[3],
+		address[4],
+		address[5]);
+}
+
+static BOOL AAPDiagExtractAddress(const struct sockaddr *address,
+	socklen_t length,
+	NSString *layout,
+	uint8_t output[6]) {
+	if (!address || !output) {
+		return NO;
+	}
+	const uint8_t *bytes = (const uint8_t *)address;
+	if ([layout isEqualToString:@"psm_offset_8"]) {
+		if (length < 8) {
+			return NO;
+		}
+		memcpy(output, bytes + 2, 6);
+		return YES;
+	}
+	if (length >= 10) {
+		memcpy(output, bytes + 4, 6);
+		return YES;
+	}
+	return NO;
+}
+
 static void AAPDiagTrackBluetoothSocket(int fd) {
 	if (fd < 0) {
 		return;
@@ -160,6 +228,11 @@ static void AAPDiagTrackBluetoothSocket(int fd) {
 		AAPDiagSockets[slot].fd = fd;
 		AAPDiagSockets[slot].bluetooth = YES;
 		AAPDiagSockets[slot].aacp = NO;
+		AAPDiagSockets[slot].address[0] = '\0';
+		AAPDiagSockets[slot].connected = NO;
+		AAPDiagSockets[slot].connectedAt = 0;
+		AAPDiagSockets[slot].lastTX = 0;
+		AAPDiagSockets[slot].lastRX = 0;
 	}
 	pthread_mutex_unlock(&AAPDiagSocketLock);
 }
@@ -184,6 +257,60 @@ static void AAPDiagPromoteSocketToAACP(int fd) {
 	pthread_mutex_unlock(&AAPDiagSocketLock);
 }
 
+static void AAPDiagRecordAACPRX(int fd,
+	const void *bytes,
+	size_t length,
+	uint64_t timestamp) {
+	if (!bytes || !length) {
+		return;
+	}
+	NSString *address = nil;
+	char addressBuffer[18] = {0};
+	pthread_mutex_lock(&AAPDiagSocketLock);
+	int slot = AAPDiagFindSocketLocked(fd);
+	if (slot < 0 || !AAPDiagSockets[slot].aacp) {
+		pthread_mutex_unlock(&AAPDiagSocketLock);
+		return;
+	}
+	AAPDiagSockets[slot].lastRX = timestamp;
+	strlcpy(addressBuffer,
+		AAPDiagSockets[slot].address,
+		sizeof(addressBuffer));
+	pthread_mutex_unlock(&AAPDiagSocketLock);
+
+	pthread_mutex_lock(&AAPDiagRXLock);
+	AAPDiagRXFrame *frame =
+		&AAPDiagRXFrames[AAPDiagRXFrameCursor % AAP_DIAG_RX_FRAMES];
+	memset(frame, 0, sizeof(*frame));
+	frame->fd = fd;
+	frame->timestamp = timestamp;
+	frame->length = MIN(length, (size_t)AAP_DIAG_RX_BYTES);
+	memcpy(frame->bytes, bytes, frame->length);
+	strlcpy(frame->address, addressBuffer, sizeof(frame->address));
+	AAPDiagRXFrameCursor++;
+	if (AAPDiagRXFrameCount < AAP_DIAG_RX_FRAMES) {
+		AAPDiagRXFrameCount++;
+	}
+	pthread_mutex_unlock(&AAPDiagRXLock);
+	address = [NSString stringWithUTF8String:addressBuffer];
+	AAPDiagSocketLog(
+		@"aacp_socket_rx fd=%d len=%zu address=%@ bytes=%@",
+		fd,
+		length,
+		address.length ? address : @"unknown",
+		AAPDiagSocketHex(bytes, length));
+}
+
+static void AAPDiagRemoveRXHistoryLocked(int fd) {
+	for (int index = 0; index < AAP_DIAG_RX_FRAMES; index++) {
+		if (AAPDiagRXFrames[index].fd == fd) {
+			memset(&AAPDiagRXFrames[index],
+				0,
+				sizeof(AAPDiagRXFrames[index]));
+		}
+	}
+}
+
 static BOOL AAPDiagRemoveSocket(int fd, BOOL *wasAACP) {
 	BOOL wasTracked = NO;
 	if (wasAACP) {
@@ -199,6 +326,11 @@ static BOOL AAPDiagRemoveSocket(int fd, BOOL *wasAACP) {
 		AAPDiagSockets[slot] = (AAPDiagSocketState){0};
 	}
 	pthread_mutex_unlock(&AAPDiagSocketLock);
+	if (wasAACP) {
+		pthread_mutex_lock(&AAPDiagRXLock);
+		AAPDiagRemoveRXHistoryLocked(fd);
+		pthread_mutex_unlock(&AAPDiagRXLock);
+	}
 	return wasTracked;
 }
 
@@ -273,6 +405,25 @@ static int AAPDiagConnectHook(int fd,
 	if (matched) {
 		AAPDiagPromoteSocketToAACP(fd);
 	}
+	BOOL connected = result == 0 ||
+		savedErrno == EINPROGRESS ||
+		savedErrno == EALREADY;
+	if (matched && connected) {
+		uint8_t mac[6] = {0};
+		if (AAPDiagExtractAddress(address, length, layout, mac)) {
+			pthread_mutex_lock(&AAPDiagSocketLock);
+			int slot = AAPDiagFindSocketLocked(fd);
+			if (slot >= 0) {
+				AAPDiagSetSocketAddressLocked(
+					&AAPDiagSockets[slot],
+					mac);
+				AAPDiagSockets[slot].connected = YES;
+				AAPDiagSockets[slot].connectedAt =
+					AAPDiagMonotonicMicroseconds();
+			}
+			pthread_mutex_unlock(&AAPDiagSocketLock);
+		}
+	}
 	BOOL bluetoothFamily = address && length >= 2 &&
 		(((const uint8_t *)address)[1] == AAP_DIAG_AF_BLUETOOTH ||
 		 (((const uint8_t *)address)[0] == AAP_DIAG_AF_BLUETOOTH &&
@@ -304,6 +455,15 @@ static ssize_t AAPDiagSendHook(int fd,
 		: send(fd, bytes, length, flags);
 	int savedErrno = errno;
 	if (AAPDiagSocketIsAACP(fd)) {
+		if (result > 0) {
+			pthread_mutex_lock(&AAPDiagSocketLock);
+			int slot = AAPDiagFindSocketLocked(fd);
+			if (slot >= 0) {
+				AAPDiagSockets[slot].lastTX =
+					AAPDiagMonotonicMicroseconds();
+			}
+			pthread_mutex_unlock(&AAPDiagSocketLock);
+		}
 		AAPDiagSocketLog(
 			@"aacp_socket_tx fd=%d result=%ld errno=%d(%s) bytes=%@",
 			fd,
@@ -327,8 +487,76 @@ static ssize_t AAPDiagRecvHook(int fd,
 		: recv(fd, bytes, length, flags);
 	int savedErrno = errno;
 	if (AAPDiagSocketIsAACP(fd)) {
+		if (result > 0) {
+			AAPDiagRecordAACPRX(fd,
+				bytes,
+				(size_t)result,
+				AAPDiagMonotonicMicroseconds());
+		}
 		AAPDiagSocketLog(
 			@"aacp_socket_rx fd=%d result=%ld errno=%d(%s) bytes=%@",
+			fd,
+			(long)result,
+			savedErrno,
+			strerror(savedErrno),
+			result > 0
+				? AAPDiagSocketHex(bytes, (size_t)result)
+				: @"");
+	}
+	errno = savedErrno;
+	return result;
+}
+
+static ssize_t AAPDiagRecvFromHook(int fd,
+	void *bytes,
+	size_t length,
+	int flags,
+	struct sockaddr *address,
+	socklen_t *addressLength) {
+	ssize_t result = AAPDiagOriginalRecvFrom
+		? AAPDiagOriginalRecvFrom(fd,
+			bytes,
+			length,
+			flags,
+			address,
+			addressLength)
+		: recvfrom(fd, bytes, length, flags, address, addressLength);
+	int savedErrno = errno;
+	if (AAPDiagSocketIsAACP(fd)) {
+		if (result > 0) {
+			AAPDiagRecordAACPRX(fd,
+				bytes,
+				(size_t)result,
+				AAPDiagMonotonicMicroseconds());
+		}
+		AAPDiagSocketLog(
+			@"aacp_socket_recvfrom fd=%d result=%ld errno=%d(%s) bytes=%@",
+			fd,
+			(long)result,
+			savedErrno,
+			strerror(savedErrno),
+			result > 0
+				? AAPDiagSocketHex(bytes, (size_t)result)
+				: @"");
+	}
+	errno = savedErrno;
+	return result;
+}
+
+static ssize_t AAPDiagReadHook(int fd, void *bytes, size_t length) {
+	ssize_t result = AAPDiagOriginalRead
+		? AAPDiagOriginalRead(fd, bytes, length)
+		: read(fd, bytes, length);
+	int savedErrno = errno;
+	if (AAPDiagSocketIsAACP(fd)) {
+		if (result > 0) {
+			AAPDiagRecordAACPRX(fd,
+				bytes,
+				(size_t)result,
+				AAPDiagMonotonicMicroseconds());
+		}
+		AAPDiagSocketLog(
+			@"aacp_socket_read fd=%d result=%ld errno=%d(%s) bytes=%@",
 			fd,
 			(long)result,
 			savedErrno,
@@ -358,6 +586,125 @@ static int AAPDiagCloseHook(int fd) {
 	}
 	errno = savedErrno;
 	return result;
+}
+
+static int AAPDiagActiveAACPDescriptorLocked(
+	NSString *address,
+	BOOL *addressMatched,
+	BOOL *fallbackUnique) {
+	uint64_t now = AAPDiagMonotonicMicroseconds();
+	NSString *normalized = AAPDiagNormalizeAddress(address);
+	int best = -1;
+	uint64_t bestFreshness = 0;
+	int unique = -1;
+	int uniqueCount = 0;
+	for (int index = 0; index < AAP_DIAG_TRACKED_FDS; index++) {
+		AAPDiagSocketState *state = &AAPDiagSockets[index];
+		if (!state->bluetooth || !state->aacp || !state->connected ||
+			state->fd < 0) {
+			continue;
+		}
+		uint64_t freshness = MAX(state->lastTX,
+			MAX(state->lastRX, state->connectedAt));
+		if (!freshness ||
+			now > freshness + AAP_DIAG_ACTIVE_FD_WINDOW_US) {
+			continue;
+		}
+		unique = state->fd;
+		uniqueCount++;
+		if (normalized.length && state->address[0] &&
+			[normalized isEqualToString:
+				[NSString stringWithUTF8String:state->address]]) {
+			if (best < 0 || freshness > bestFreshness) {
+				best = state->fd;
+				bestFreshness = freshness;
+			}
+		}
+	}
+	if (addressMatched) {
+		*addressMatched = best >= 0;
+	}
+	if (fallbackUnique) {
+		*fallbackUnique = NO;
+	}
+	if (best >= 0) {
+		return best;
+	}
+	if (uniqueCount == 1) {
+		if (fallbackUnique) {
+			*fallbackUnique = YES;
+		}
+		return unique;
+	}
+	return -1;
+}
+
+int AAPDiagCopyActiveAACPDescriptorWithMatch(
+	NSString *address,
+	BOOL *addressMatched) {
+	if (addressMatched) {
+		*addressMatched = NO;
+	}
+	BOOL fallbackUnique = NO;
+	pthread_mutex_lock(&AAPDiagSocketLock);
+	int fd = AAPDiagActiveAACPDescriptorLocked(address,
+		addressMatched,
+		&fallbackUnique);
+	pthread_mutex_unlock(&AAPDiagSocketLock);
+	if (fd >= 0) {
+		AAPDiagSocketLog(
+			@"aacp_active_fd fd=%d address=%@ exact=%d fallback_unique=%d",
+			fd,
+			address ?: @"nil",
+			addressMatched ? *addressMatched : -1,
+			fallbackUnique);
+	}
+	return fd;
+}
+
+NSArray<NSDictionary<NSString *, id> *> *
+	AAPDiagCopyAACPRXFramesForDescriptor(
+		int fd,
+		uint64_t sinceMicroseconds) {
+	if (fd < 0) {
+		return @[];
+	}
+	pthread_mutex_lock(&AAPDiagRXLock);
+	NSMutableArray<NSDictionary<NSString *, id> *> *frames =
+		[NSMutableArray array];
+	for (int index = 0; index < AAP_DIAG_RX_FRAMES; index++) {
+		AAPDiagRXFrame *frame = &AAPDiagRXFrames[index];
+		if (frame->fd != fd || !frame->timestamp ||
+			frame->timestamp < sinceMicroseconds || !frame->length) {
+			continue;
+		}
+		NSData *data = [NSData dataWithBytes:frame->bytes
+			length:frame->length];
+		[frames addObject:@{
+			@"fd": @(frame->fd),
+			@"address": [NSString stringWithUTF8String:frame->address]
+				?: @"",
+			@"timestamp_us": @(frame->timestamp),
+			@"length": @(frame->length),
+			@"hex": AAPDiagHex(data),
+			@"data": data,
+		}];
+	}
+	pthread_mutex_unlock(&AAPDiagRXLock);
+	[frames sortUsingComparator:^NSComparisonResult(
+		NSDictionary<NSString *, id> *left,
+		NSDictionary<NSString *, id> *right) {
+		uint64_t leftTimestamp = [left[@"timestamp_us"] unsignedLongLongValue];
+		uint64_t rightTimestamp = [right[@"timestamp_us"] unsignedLongLongValue];
+		if (leftTimestamp < rightTimestamp) {
+			return NSOrderedAscending;
+		}
+		if (leftTimestamp > rightTimestamp) {
+			return NSOrderedDescending;
+		}
+		return NSOrderedSame;
+	}];
+	return frames;
 }
 
 static BOOL AAPDiagTypeIsSupported(const char *type, BOOL allowVoid) {
@@ -829,6 +1176,12 @@ void AAPDiagInstallRuntimeHooks(void) {
 		AAPDiagHookFunction("recv",
 			(void *)AAPDiagRecvHook,
 			(void **)&AAPDiagOriginalRecv);
+		AAPDiagHookFunction("recvfrom",
+			(void *)AAPDiagRecvFromHook,
+			(void **)&AAPDiagOriginalRecvFrom);
+		AAPDiagHookFunction("read",
+			(void *)AAPDiagReadHook,
+			(void **)&AAPDiagOriginalRead);
 		AAPDiagHookFunction("close",
 			(void *)AAPDiagCloseHook,
 			(void **)&AAPDiagOriginalClose);
@@ -844,6 +1197,6 @@ void AAPDiagInstallRuntimeHooks(void) {
 				});
 		}
 		AAPDiagLog(@"diag_marker phase=runtime_hooks_installed "
-			@"marker=diag9_direct_adaptive_transport");
+			@"marker=diag10_active_aacp_fd_reuse");
 	});
 }

@@ -13,7 +13,6 @@ static void AAPDiagDaemonWriteReady(NSString *status) {
 		@"executable": NSProcessInfo.processInfo.arguments.firstObject
 			?: @"/var/jb/usr/bin/aacpdiagd",
 		@"is_bluetoothd": @NO,
-		@"is_heard": @NO,
 		@"source": @"aacpdiagd",
 		@"version": AAPDiagVersion,
 	});

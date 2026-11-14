@@ -3,7 +3,7 @@
 LOG=/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.log
 BOOT_LOG=/var/tmp/com.lns.pogr.aacpdiag/helper-boot.log
 TMP_BOOT_LOG=/tmp/com.lns.pogr.aacpdiag/helper-boot.log
-PACKAGE_VERSION=0.5.8~adts3diag9
+PACKAGE_VERSION=0.5.8~adts3diag10
 PLIST=
 DAEMON=
 PACKAGE_PATH="${DPKG_ADMINDIR:-/var/lib/dpkg}/info/com.lns.pogr.aacpdiag.list"
@@ -124,7 +124,6 @@ rewrite_daemon_plist() {
 source_ready_file() {
 	for candidate in \
 		/var/tmp/com.lns.pogr.aacpdiag/helper-bluetoothd.plist \
-		/var/tmp/com.lns.pogr.aacpdiag/helper-heard.plist \
 		/var/tmp/com.lns.pogr.aacpdiag/helper-aacpdiagd.plist \
 		/var/tmp/com.lns.pogr.aacpdiag/helper.plist \
 		/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper.plist \
@@ -194,19 +193,15 @@ rm -f \
 	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result.plist \
 	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper.plist \
 	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result-bluetoothd.plist \
-	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result-heard.plist \
 	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result-aacpdiagd.plist \
 	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper-bluetoothd.plist \
-	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper-heard.plist \
 	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper-aacpdiagd.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/request.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/result.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/helper.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/result-bluetoothd.plist \
-	/var/tmp/com.lns.pogr.aacpdiag/result-heard.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/result-aacpdiagd.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/helper-bluetoothd.plist \
-	/var/tmp/com.lns.pogr.aacpdiag/helper-heard.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/helper-aacpdiagd.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/claim-* \
 	/var/tmp/com.lns.pogr.aacpdiag/daemon-stdout.log \
@@ -215,10 +210,8 @@ rm -f \
 	/tmp/com.lns.pogr.aacpdiag/result.plist \
 	/tmp/com.lns.pogr.aacpdiag/helper.plist \
 	/tmp/com.lns.pogr.aacpdiag/result-bluetoothd.plist \
-	/tmp/com.lns.pogr.aacpdiag/result-heard.plist \
 	/tmp/com.lns.pogr.aacpdiag/result-aacpdiagd.plist \
 	/tmp/com.lns.pogr.aacpdiag/helper-bluetoothd.plist \
-	/tmp/com.lns.pogr.aacpdiag/helper-heard.plist \
 	/tmp/com.lns.pogr.aacpdiag/helper-aacpdiagd.plist \
 	/tmp/com.lns.pogr.aacpdiag/claim-*
 
@@ -276,8 +269,7 @@ fi
 
 killall -TERM Preferences 2>/dev/null || true
 killall -TERM bluetoothd 2>/dev/null || true
-killall -TERM heard 2>/dev/null || true
-for process in Preferences bluetoothd heard; do
+for process in Preferences bluetoothd; do
 	if killall -0 "$process" 2>/dev/null; then
 		log_line "process_restart_status name=$process state=still_running"
 	else

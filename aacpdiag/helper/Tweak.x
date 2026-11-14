@@ -7,7 +7,6 @@
 #import "../shared/AACPDiag.h"
 
 static BOOL AAPDiagHelperIsBluetoothd;
-static BOOL AAPDiagHelperIsHeard;
 static unsigned long long AAPDiagHelperLastSequence;
 static NSTimeInterval AAPDiagHelperLastReadyTime;
 static dispatch_queue_t AAPDiagHelperPollQueue;
@@ -15,9 +14,6 @@ static dispatch_queue_t AAPDiagHelperPollQueue;
 static NSString *AAPDiagHelperSource(void) {
 	if (AAPDiagHelperIsBluetoothd) {
 		return @"bluetoothd";
-	}
-	if (AAPDiagHelperIsHeard) {
-		return @"heard";
 	}
 	return @"unknown";
 }
@@ -175,23 +171,18 @@ static void AAPDiagStartRequestPoller(void) {
 	BOOL isBluetoothd =
 		strstr(executablePath, "bluetoothd") != NULL ||
 		[processName isEqualToString:@"bluetoothd"];
-	BOOL isHeard =
-		strstr(executablePath, "heard") != NULL ||
-		[processName isEqualToString:@"heard"];
-	if (!isBluetoothd && !isHeard) {
+	if (!isBluetoothd) {
 		AAPDiagLog(@"helper_ctor_skip executable=%@ process=%@",
 			executable,
 			processName);
 		return;
 	}
 	AAPDiagHelperIsBluetoothd = isBluetoothd;
-	AAPDiagHelperIsHeard = isHeard;
 
 	AAPDiagWriteHelperReady(@{
 		@"status": @"helper_loaded",
 		@"executable": executable,
 		@"is_bluetoothd": @(isBluetoothd),
-		@"is_heard": @(isHeard),
 		@"source": AAPDiagHelperSource(),
 		@"version": AAPDiagVersion,
 	});
@@ -205,7 +196,6 @@ static void AAPDiagStartRequestPoller(void) {
 		@"status": @"helper_ready",
 		@"executable": executable,
 		@"is_bluetoothd": @(isBluetoothd),
-		@"is_heard": @(isHeard),
 		@"source": AAPDiagHelperSource(),
 		@"version": AAPDiagVersion,
 	});

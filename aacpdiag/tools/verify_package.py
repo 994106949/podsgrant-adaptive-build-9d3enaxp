@@ -15,6 +15,8 @@ MH_MAGIC_64 = 0xFEEDFACF
 MH_CIGAM_64 = 0xCFFAEDFE
 FAT_MAGIC = 0xCAFEBABE
 FAT_MAGIC_64 = 0xCAFEBABF
+PACKAGE_VERSION = "0.5.8~adts3diag10"
+DIAGNOSTIC_MARKER = b"diag10_active_aacp_fd_reuse"
 
 
 def read_ar(path: pathlib.Path) -> dict[str, bytes]:
@@ -151,12 +153,12 @@ def main() -> int:
     control = read_control(members)
     if control.get("Package") != "com.lns.pogr.aacpdiag":
         raise ValueError(f"unexpected Package: {control.get('Package')!r}")
-    if control.get("Version") != "0.5.8~adts3diag9":
+    if control.get("Version") != PACKAGE_VERSION:
         raise ValueError(f"unexpected Version: {control.get('Version')!r}")
 
     expected_scripts = {
         "postinst": (
-            b"0.5.8~adts3diag9",
+            PACKAGE_VERSION.encode("ascii"),
             b"source_ready_file",
             b"claim-*",
             b"daemon_direct_fallback_begin",
@@ -176,7 +178,8 @@ def main() -> int:
         ),
         "postrm": (
             b"claim-*",
-            b"result-heard.plist",
+            b"result-bluetoothd.plist",
+            b"result-aacpdiagd.plist",
             b"bootout",
             b"killall",
         ),
@@ -205,6 +208,10 @@ def main() -> int:
             if missing_markers:
                 raise ValueError(
                     f"{script_name} is missing markers: {missing_markers}"
+                )
+            if b"heard" in data.lower():
+                raise ValueError(
+                    f"{script_name} still contains legacy heard handling"
                 )
 
     payload_name, archive = read_payload(members)
@@ -308,36 +315,37 @@ def main() -> int:
         ui_filter.get("Filter", {}).get("Bundles", [])
     ):
         raise ValueError("UI filter is missing com.apple.Preferences")
-    if "bluetoothd" not in (
-        helper_filter.get("Filter", {}).get("Executables", [])
-    ):
-        raise ValueError("helper filter is missing bluetoothd")
-    if "heard" not in (
-        helper_filter.get("Filter", {}).get("Executables", [])
-    ):
-        raise ValueError("helper filter is missing heard")
+    helper_executables = helper_filter.get("Filter", {}).get("Executables")
+    if helper_executables != ["bluetoothd"]:
+        raise ValueError(
+            f"helper filter must target only bluetoothd: "
+            f"{helper_executables!r}"
+        )
 
     binary_markers = {
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiag.dylib": (
             b"source=aacp_ui",
-            b"0.5.8~adts3diag9",
+            PACKAGE_VERSION.encode("ascii"),
         ),
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiagHelper.dylib": (
             b"source=helper",
-            b"0.5.8~adts3diag9",
+            PACKAGE_VERSION.encode("ascii"),
         ),
         "usr/bin/aacpdiagd": (
             b"source=aacpdiagd",
-            b"0.5.8~adts3diag9",
+            PACKAGE_VERSION.encode("ascii"),
         ),
     }
     runtime_markers = {
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiag.dylib": (
-            b"diag9_direct_adaptive_transport",
+            DIAGNOSTIC_MARKER,
+            b"Active FD Sent / Unconfirmed",
         ),
         "Library/MobileSubstrate/DynamicLibraries/"
         "PodsGrantAACPDiagHelper.dylib": (
-            b"diag9_direct_adaptive_transport",
+            DIAGNOSTIC_MARKER,
+            b"active_aacp_fd_tx_unconfirmed",
+            b"active_aacp_fd_tx_failed",
         ),
     }
     for binary_name, markers in runtime_markers.items():

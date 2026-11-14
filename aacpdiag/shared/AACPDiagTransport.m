@@ -13,7 +13,7 @@
 #define AAP_BTPROTO_L2CAP 0
 #define AAP_AACP_PSM 0x1001
 #define AAP_CONNECT_TIMEOUT_MS 900
-#define AAP_CONFIG_WAIT_MS 350
+#define AAP_CONFIG_WAIT_MS 100
 #define AAP_MODE_WAIT_MS 2200
 
 struct AAPDiagL2CapAddress {
@@ -217,6 +217,174 @@ static NSData *AAPDiagFrame(uint8_t settingID, uint8_t value) {
 	return [NSData dataWithBytes:bytes length:sizeof(bytes)];
 }
 
+static BOOL AAPDiagPacketMatches(NSData *packet,
+	uint8_t settingID,
+	NSNumber **modeValue) {
+	if (packet.length < 7) {
+		return NO;
+	}
+	const uint8_t *bytes = packet.bytes;
+	if (memcmp(bytes, AAPDiagAACPHeader, sizeof(AAPDiagAACPHeader)) != 0) {
+		return NO;
+	}
+	if (bytes[4] != 0x09 || bytes[5] != 0x00 || bytes[6] != settingID) {
+		return NO;
+	}
+	if (modeValue) {
+		*modeValue = packet.length > 7 ? @(bytes[7]) : @(-1);
+	}
+	return YES;
+}
+
+static NSDictionary<NSString *, id> *AAPDiagMatchRXFrame(
+	NSDictionary<NSString *, id> *frame,
+	uint8_t settingID,
+	unsigned int requestedMode) {
+	NSData *data = frame[@"data"];
+	if (![data isKindOfClass:[NSData class]]) {
+		return nil;
+	}
+	NSNumber *echoedMode = nil;
+	if (!AAPDiagPacketMatches(data, settingID, &echoedMode)) {
+		return nil;
+	}
+	return @{
+		@"packet": frame[@"hex"] ?: AAPDiagHex(data),
+		@"echoed_mode": echoedMode ?: @(-1),
+		@"echo_matches": @(echoedMode &&
+			echoedMode.unsignedIntValue == requestedMode),
+		@"timestamp_us": frame[@"timestamp_us"] ?: @0,
+	};
+}
+
+static NSDictionary<NSString *, id> *AAPDiagFindSettingInFrames(
+	NSArray<NSDictionary<NSString *, id> *> *frames,
+	uint8_t settingID,
+	unsigned int requestedMode,
+	NSUInteger *matchCount) {
+	NSDictionary *last = nil;
+	NSUInteger count = 0;
+	for (NSDictionary *frame in frames) {
+		NSDictionary *match =
+			AAPDiagMatchRXFrame(frame, settingID, requestedMode);
+		if (!match) {
+			continue;
+		}
+		count++;
+		last = match;
+		if ([match[@"echo_matches"] boolValue]) {
+			break;
+		}
+	}
+	if (matchCount) {
+		*matchCount = count;
+	}
+	return last;
+}
+
+static NSDictionary<NSString *, id> *AAPDiagRunActiveDescriptorTransport(
+	NSString *address,
+	unsigned int mode,
+	NSMutableArray<NSString *> *trace,
+	NSMutableArray<NSString *> *packets) {
+	BOOL exactMatch = NO;
+	int fd = AAPDiagCopyActiveAACPDescriptorWithMatch(address, &exactMatch);
+	if (fd < 0) {
+		return @{
+			@"available": @NO,
+			@"reason": @"no_fresh_active_aacp_fd",
+		};
+	}
+	BOOL fallbackUnique = !exactMatch;
+	uint64_t started = AAPDiagMonotonicMicroseconds();
+	[trace addObject:[NSString stringWithFormat:
+		@"active_fd_selected fd=%d exact=%d fallback_unique=%d",
+		fd,
+		exactMatch,
+		fallbackUnique]];
+
+	NSData *configFrame = AAPDiagFrame(AAPDiagListeningConfigID, 0x0F);
+	ssize_t configSent = send(fd, configFrame.bytes, configFrame.length, 0);
+	BOOL configOK = configSent == (ssize_t)configFrame.length;
+	[trace addObject:[NSString stringWithFormat:
+		@"active_fd_tx id=0x%02X value=15 sent=%ld expected=%lu",
+		AAPDiagListeningConfigID,
+		(long)configSent,
+		(unsigned long)configFrame.length]];
+	if (!configOK) {
+		return @{
+			@"available": @YES,
+			@"fd": @(fd),
+			@"exact_match": @(exactMatch),
+			@"fallback_unique": @(fallbackUnique),
+			@"config_sent": @NO,
+			@"mode_sent": @NO,
+			@"mode_ack": @{},
+			@"rx_frames": @[],
+			@"rx_packets": packets,
+			@"tx_confirmed": @NO,
+		};
+	}
+
+	[NSThread sleepForTimeInterval:0.20];
+	uint64_t modeSentAt = AAPDiagMonotonicMicroseconds();
+	NSData *modeFrame = AAPDiagFrame(AAPDiagListeningModeID, (uint8_t)mode);
+	ssize_t modeSent = send(fd, modeFrame.bytes, modeFrame.length, 0);
+	BOOL modeOK = modeSent == (ssize_t)modeFrame.length;
+	[trace addObject:[NSString stringWithFormat:
+		@"active_fd_tx id=0x%02X value=%u sent=%ld expected=%lu",
+		AAPDiagListeningModeID,
+		mode,
+		(long)modeSent,
+		(unsigned long)modeFrame.length]];
+
+	NSArray<NSDictionary<NSString *, id> *> *frames = @[];
+	NSDictionary *modeAck = nil;
+	NSUInteger modeAckCount = 0;
+	if (modeOK) {
+		NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:
+			(NSTimeInterval)AAP_MODE_WAIT_MS / 1000.0];
+		while ([deadline timeIntervalSinceNow] > 0) {
+			frames = AAPDiagCopyAACPRXFramesForDescriptor(fd, modeSentAt);
+			modeAck = AAPDiagFindSettingInFrames(frames,
+				AAPDiagListeningModeID,
+				mode,
+				&modeAckCount);
+			if (modeAck && [modeAck[@"echo_matches"] boolValue]) {
+				break;
+			}
+			[NSThread sleepForTimeInterval:0.05];
+		}
+	}
+	for (NSDictionary *frame in frames) {
+		NSString *hex = frame[@"hex"];
+		if (hex.length) {
+			[packets addObject:hex];
+			[trace addObject:[NSString stringWithFormat:
+				@"active_fd_rx len=%@ bytes=%@ timestamp_us=%@",
+				frame[@"length"] ?: @0,
+				hex,
+				frame[@"timestamp_us"] ?: @0]];
+		}
+	}
+	BOOL txConfirmed = configOK && modeOK;
+	return @{
+		@"available": @YES,
+		@"fd": @(fd),
+		@"exact_match": @(exactMatch),
+		@"fallback_unique": @(fallbackUnique),
+		@"config_sent": @(configOK),
+		@"mode_sent": @(modeOK),
+		@"mode_ack": modeAck ?: @{},
+		@"mode_ack_count": @(modeAckCount),
+		@"rx_frames": frames,
+		@"rx_packets": packets,
+		@"tx_confirmed": @(txConfirmed),
+		@"started_us": @(started),
+		@"mode_sent_us": @(modeSentAt),
+	};
+}
+
 static BOOL AAPDiagSendPacket(int fd,
 	uint8_t settingID,
 	uint8_t value,
@@ -249,25 +417,6 @@ static BOOL AAPDiagSendPacket(int fd,
 					strerror(sendError)]}];
 	}
 	return NO;
-}
-
-static BOOL AAPDiagPacketMatches(NSData *packet,
-	uint8_t settingID,
-	NSNumber **modeValue) {
-	if (packet.length < 7) {
-		return NO;
-	}
-	const uint8_t *bytes = packet.bytes;
-	if (memcmp(bytes, AAPDiagAACPHeader, sizeof(AAPDiagAACPHeader)) != 0) {
-		return NO;
-	}
-	if (bytes[4] != 0x09 || bytes[5] != 0x00 || bytes[6] != settingID) {
-		return NO;
-	}
-	if (modeValue && packet.length > 7) {
-		*modeValue = @(bytes[7]);
-	}
-	return YES;
 }
 
 static BOOL AAPDiagWaitForSetting(int fd,
@@ -380,6 +529,76 @@ NSDictionary<NSString *, id> *AAPDiagRunTransportTest(NSString *address,
 		};
 	}
 
+	NSDictionary *active = AAPDiagRunActiveDescriptorTransport(
+		normalized,
+		mode,
+		trace,
+		packets);
+	if ([active[@"available"] boolValue]) {
+		NSDictionary *modeAck = active[@"mode_ack"];
+		BOOL txConfirmed = [active[@"tx_confirmed"] boolValue];
+		NSString *status = nil;
+		if (!txConfirmed) {
+			status = @"active_aacp_fd_tx_failed";
+		} else if ([modeAck isKindOfClass:[NSDictionary class]] &&
+			modeAck.count &&
+			[modeAck[@"echo_matches"] boolValue]) {
+			status = @"protocol_ack";
+		} else if ([modeAck isKindOfClass:[NSDictionary class]] &&
+			modeAck.count) {
+			status = @"protocol_reply_mismatch";
+		} else {
+			status = @"active_aacp_fd_tx_unconfirmed";
+		}
+		[trace addObject:[NSString stringWithFormat:
+			@"transport_result status=%@ active_fd_used=1",
+			status]];
+		return @{
+			@"status": status,
+			@"mode": @(mode),
+			@"address": normalized ?: @"",
+			@"active_fd_used": @YES,
+			@"active_fd_fallback_unique":
+				active[@"fallback_unique"] ?: @NO,
+			@"active_fd": active[@"fd"] ?: @-1,
+			@"active_fd_exact_match":
+				active[@"exact_match"] ?: @NO,
+			@"tx_confirmed": @(txConfirmed),
+			@"config_frame": AAPDiagHex(AAPDiagFrame(
+				AAPDiagListeningConfigID, 0x0F)),
+			@"mode_frame": AAPDiagHex(AAPDiagFrame(
+				AAPDiagListeningModeID, (uint8_t)mode)),
+			@"mode_ack": modeAck ?: @{},
+			@"mode_ack_count": active[@"mode_ack_count"] ?: @0,
+			@"rx_packets": active[@"rx_packets"] ?: @[],
+			@"rx_frames": active[@"rx_frames"] ?: @[],
+			@"rx_frame_count":
+				@([active[@"rx_frames"] count]),
+			@"trace": trace,
+			@"timestamp": @([[NSDate date] timeIntervalSince1970]),
+		};
+	}
+
+	[trace addObject:[NSString stringWithFormat:
+		@"active_fd_unavailable reason=%@",
+		active[@"reason"] ?: @"unknown"]];
+
+#if defined(AACPDIAG_TRANSPORT_NO_ACTIVE_FD) && AACPDIAG_TRANSPORT_NO_ACTIVE_FD
+	[trace addObject:@"direct_fallback_disabled"];
+	return @{
+		@"status": @"active_aacp_fd_tx_unconfirmed",
+		@"mode": @(mode),
+		@"address": normalized ?: @"",
+		@"active_fd_used": @NO,
+		@"active_fd_fallback_unique": @NO,
+		@"tx_confirmed": @NO,
+		@"mode_ack": @{},
+		@"rx_packets": packets,
+		@"rx_frames": @[],
+		@"trace": trace,
+		@"timestamp": @([[NSDate date] timeIntervalSince1970]),
+	};
+#else
 	NSString *connectedLayout = nil;
 	int fd = AAPDiagConnect(normalized, trace, &connectedLayout);
 	if (fd < 0) {
@@ -388,8 +607,12 @@ NSDictionary<NSString *, id> *AAPDiagRunTransportTest(NSString *address,
 			@"status": @"connect_failed",
 			@"mode": @(mode),
 			@"address": normalized ?: @"",
-			@"trace": trace,
+			@"active_fd_used": @NO,
+			@"active_fd_fallback_unique": @NO,
+			@"tx_confirmed": @NO,
 			@"rx_packets": packets,
+			@"rx_frames": @[],
+			@"trace": trace,
 		};
 	}
 
@@ -452,6 +675,9 @@ NSDictionary<NSString *, id> *AAPDiagRunTransportTest(NSString *address,
 		@"status": status,
 		@"mode": @(mode),
 		@"address": normalized ?: @"",
+		@"active_fd_used": @NO,
+		@"active_fd_fallback_unique": @NO,
+		@"tx_confirmed": @(configSent && modeSent),
 		@"socket_variant": connectedLayout ?: @"",
 		@"config_frame": AAPDiagHex(AAPDiagFrame(
 			AAPDiagListeningConfigID, 0x0F)),
@@ -460,7 +686,9 @@ NSDictionary<NSString *, id> *AAPDiagRunTransportTest(NSString *address,
 		@"config_ack": configAck ?: @{},
 		@"mode_ack": modeAck ?: @{},
 		@"rx_packets": packets,
+		@"rx_frames": @[],
 		@"trace": trace,
 		@"timestamp": @([[NSDate date] timeIntervalSince1970]),
 	};
+#endif
 }

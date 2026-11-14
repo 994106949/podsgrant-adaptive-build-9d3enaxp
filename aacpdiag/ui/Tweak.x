@@ -134,7 +134,7 @@ static NSString *AAPDiagGetterSummary(NSDictionary *record) {
 }
 
 static NSArray<NSString *> *AAPDiagTransportSources(void) {
-	return @[@"bluetoothd", @"heard", @"aacpdiagd"];
+	return @[@"bluetoothd", @"aacpdiagd"];
 }
 
 static NSDictionary<NSString *, id> *AAPDiagReadTransportReadiness(void) {
@@ -181,6 +181,12 @@ static NSInteger AAPDiagTransportResultPriority(NSDictionary *result) {
 	NSString *status = result[@"status"];
 	if ([status isEqualToString:@"protocol_ack"]) {
 		return 100;
+	}
+	if ([status isEqualToString:@"active_aacp_fd_tx_unconfirmed"]) {
+		return 90;
+	}
+	if ([status isEqualToString:@"active_aacp_fd_tx_failed"]) {
+		return 85;
 	}
 	if ([status isEqualToString:@"protocol_reply_mismatch"]) {
 		return 80;
@@ -399,6 +405,13 @@ static NSDictionary *AAPDiagRunCombinedTest(
 
 	BOOL transportACK =
 		AAPDiagResultHasProtocolACK(transportResult);
+	NSString *transportStatus = transportResult[@"status"];
+	BOOL activeFDUnconfirmed =
+		[transportStatus isEqualToString:
+			@"active_aacp_fd_tx_unconfirmed"];
+	BOOL activeFDFailed =
+		[transportStatus isEqualToString:
+			@"active_aacp_fd_tx_failed"];
 	NSString *nativeStatus = nativeResult[@"status"];
 	BOOL nativeInvoked =
 		[nativeStatus isEqualToString:
@@ -409,15 +422,22 @@ static NSDictionary *AAPDiagRunCombinedTest(
 	BOOL setterMissing =
 		[nativeStatus isEqualToString:@"native_setter_missing"] ||
 		[nativeStatus isEqualToString:@"setter_missing"];
-	combined[@"status"] = transportACK
-		? @"protocol_ack"
-		: (nativeInvoked
-			? @"native_setter_invoked_unconfirmed"
-			: (deviceMissing
-				? @"device_missing"
-				: (setterMissing
-					? @"setter_missing"
-					: @"no_confirmation")));
+	if (transportACK) {
+		combined[@"status"] = @"protocol_ack";
+	} else if (activeFDUnconfirmed) {
+		combined[@"status"] = @"active_aacp_fd_tx_unconfirmed";
+	} else if (activeFDFailed) {
+		combined[@"status"] = @"active_aacp_fd_tx_failed";
+	} else if (nativeInvoked) {
+		combined[@"status"] = @"native_setter_invoked_unconfirmed";
+	} else if (deviceMissing) {
+		combined[@"status"] = @"device_missing";
+	} else if (setterMissing) {
+		combined[@"status"] = @"setter_missing";
+	} else {
+		combined[@"status"] = transportResult[@"status"]
+			?: @"transport_no_reply";
+	}
 
 	BOOL finalGetterAvailable = NO;
 	unsigned int finalGetter =
@@ -450,6 +470,13 @@ static NSString *AAPDiagConfirmationTitle(NSDictionary *result) {
 		return @"Protocol ACK";
 	}
 	if ([status isEqualToString:
+		@"active_aacp_fd_tx_unconfirmed"]) {
+		return @"Active FD Sent / Unconfirmed";
+	}
+	if ([status isEqualToString:@"active_aacp_fd_tx_failed"]) {
+		return @"Active FD Send Failed";
+	}
+	if ([status isEqualToString:
 		@"native_setter_invoked_unconfirmed"]) {
 		return @"Native Setter Invoked / Unconfirmed";
 	}
@@ -459,7 +486,7 @@ static NSString *AAPDiagConfirmationTitle(NSDictionary *result) {
 	if ([status isEqualToString:@"setter_missing"]) {
 		return @"Setter Missing";
 	}
-	return @"No Confirmation";
+	return status;
 }
 
 static void AAPDiagShowResult(BTSDeviceConfigController *controller,
@@ -651,22 +678,14 @@ static void AAPDiagShowResult(BTSDeviceConfigController *controller,
 	UIAlertController *sheet = [UIAlertController
 		alertControllerWithTitle:@"AACP Diagnostic"
 		message:[NSString stringWithFormat:
-			@"%@\nproductId=%u\n\nEach test writes 0x0F, sets the mode, then reads it back.",
+			@"%@\nproductId=%u",
 			address,
 			device.productId]
 		preferredStyle:UIAlertControllerStyleActionSheet];
 	NSArray<NSDictionary *> *items = @[
 		@{
-			@"title": @"Enable Adaptive Transparency",
+			@"title": @"Adaptive Transparency Mode",
 			@"mode": @(AAPDiagModeAdaptive),
-		},
-		@{
-			@"title": @"Test ANC",
-			@"mode": @(AAPDiagModeNoiseCancellation),
-		},
-		@{
-			@"title": @"Test Transparency",
-			@"mode": @(AAPDiagModeTransparency),
 		},
 	];
 	for (NSDictionary *item in items) {

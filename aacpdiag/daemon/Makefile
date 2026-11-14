@@ -7,7 +7,7 @@ TOOL_NAME = aacpdiagd
 aacpdiagd_FILES = main.m \
 	../shared/AACPDiagCommon.m \
 	../shared/AACPDiagTransport.m
-aacpdiagd_CFLAGS = -fobjc-arc
+aacpdiagd_CFLAGS = -fobjc-arc -DAACPDIAG_TRANSPORT_NO_ACTIVE_FD=1
 aacpdiagd_FRAMEWORKS = Foundation
 aacpdiagd_INSTALL_PATH = /usr/bin
 
