@@ -17,6 +17,8 @@
 #define AAP_CONFIG_WAIT_MS 100
 #define AAP_MODE_WAIT_MS 2200
 
+#if !defined(AACPDIAG_TRANSPORT_NO_ACTIVE_FD) || \
+	!AACPDIAG_TRANSPORT_NO_ACTIVE_FD
 struct AAPDiagL2CapAddress {
 	uint8_t length;
 	uint8_t family;
@@ -32,6 +34,7 @@ struct AAPDiagL2CapAddressAlt {
 	uint16_t psm;
 	uint8_t reserved[6];
 } __attribute__((packed));
+#endif
 
 static const uint8_t AAPDiagAACPHeader[] = {0x04, 0x00, 0x04, 0x00};
 static const uint8_t AAPDiagListeningConfigID = 0x1A;
@@ -44,6 +47,8 @@ static uint64_t AAPDiagTransportMonotonicMicroseconds(void) {
 		(uint64_t)value.tv_nsec / 1000ULL;
 }
 
+#if !defined(AACPDIAG_TRANSPORT_NO_ACTIVE_FD) || \
+	!AACPDIAG_TRANSPORT_NO_ACTIVE_FD
 static BOOL AAPDiagParseAddress(NSString *address,
 	uint8_t reversed[6],
 	uint8_t direct[6]) {
@@ -213,6 +218,7 @@ static int AAPDiagConnect(NSString *address,
 	}
 	return -1;
 }
+#endif
 
 static NSData *AAPDiagFrame(uint8_t settingID, uint8_t value) {
 	const uint8_t bytes[] = {
@@ -393,6 +399,8 @@ static NSDictionary<NSString *, id> *AAPDiagRunActiveDescriptorTransport(
 	};
 }
 
+#if !defined(AACPDIAG_TRANSPORT_NO_ACTIVE_FD) || \
+	!AACPDIAG_TRANSPORT_NO_ACTIVE_FD
 static BOOL AAPDiagSendPacket(int fd,
 	uint8_t settingID,
 	uint8_t value,
@@ -512,6 +520,7 @@ static void AAPDiagDrain(int fd,
 			packetHex]];
 	}
 }
+#endif
 
 NSDictionary<NSString *, id> *AAPDiagRunTransportTest(NSString *address,
 	unsigned int mode) {
