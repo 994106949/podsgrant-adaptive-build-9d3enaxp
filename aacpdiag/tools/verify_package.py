@@ -184,16 +184,18 @@ def main() -> int:
     )
     if not expected_plist_path.is_file():
         raise ValueError(f"source daemon plist is missing: {expected_plist_path}")
-    expected_plist = expected_plist_path.read_bytes()
+    expected_plist = plistlib.loads(expected_plist_path.read_bytes())
     daemon_plist_name = "Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist"
     daemon_plist_extracted = archive.extractfile(files[daemon_plist_name])
     if daemon_plist_extracted is None:
         raise ValueError("cannot read packaged LaunchDaemon plist")
     daemon_plist_bytes = daemon_plist_extracted.read()
-    if daemon_plist_bytes != expected_plist:
-        raise ValueError("packaged LaunchDaemon plist differs from source")
-
     daemon_plist = plistlib.loads(daemon_plist_bytes)
+    if daemon_plist != expected_plist:
+        raise ValueError(
+            "packaged LaunchDaemon plist differs structurally from source"
+        )
+
     if daemon_plist.get("Label") != "com.lns.pogr.aacpdiagd":
         raise ValueError("LaunchDaemon has an unexpected Label")
     if daemon_plist.get("ProgramArguments") != [
