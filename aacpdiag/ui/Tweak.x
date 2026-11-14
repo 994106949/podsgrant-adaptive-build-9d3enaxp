@@ -175,7 +175,7 @@ static NSDictionary *AAPDiagRunCombinedTest(
 				NULL,
 				NULL,
 				true);
-			notify_post(AAPDiagNotifyName);
+			notify_post([AAPDiagNotifyName UTF8String]);
 			NSDictionary *helperResult =
 				AAPDiagWaitForHelperResult(sequence, 25.0);
 			if (!helperResult) {
