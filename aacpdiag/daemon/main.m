@@ -62,7 +62,8 @@ static NSMutableSet<NSNumber *> *AAPDiagDaemonQueuedSequences;
 static NSMutableSet<NSNumber *> *AAPDiagDaemonHandledSequences;
 static dispatch_queue_t AAPDiagDaemonPollQueue;
 
-static void AAPDiagDaemonRemember(NSMutableSet<NSNumber *> **set,
+static void AAPDiagDaemonRemember(
+	NSMutableSet<NSNumber *> * __strong *set,
 	unsigned long long sequence) {
 	if (!*set) {
 		*set = [NSMutableSet set];
