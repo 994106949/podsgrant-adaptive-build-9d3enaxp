@@ -724,22 +724,6 @@ static NSDictionary<NSString *, id> *AAPDiagInvokeNumericSetterResult(
 	return record;
 }
 
-static BOOL AAPDiagInvokeSetter(id target,
-	SEL selector,
-	unsigned int argument,
-	NSString **returnDescription,
-	NSString **error) {
-	NSDictionary<NSString *, id> *result =
-		AAPDiagInvokeNumericSetterResult(target, selector, argument);
-	if (returnDescription) {
-		*returnDescription = result[@"return"] ?: @"";
-	}
-	if (error) {
-		*error = result[@"error"] ?: @"";
-	}
-	return [result[@"invoked"] boolValue];
-}
-
 static NSDictionary<NSString *, id> *AAPDiagInvokeListeningModePair(
 	id target,
 	unsigned int mode) {
