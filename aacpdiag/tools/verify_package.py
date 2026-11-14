@@ -15,7 +15,7 @@ MH_MAGIC_64 = 0xFEEDFACF
 MH_CIGAM_64 = 0xCFFAEDFE
 FAT_MAGIC = 0xCAFEBABE
 FAT_MAGIC_64 = 0xCAFEBABF
-PACKAGE_VERSION = "0.6.0~adts3final"
+PACKAGE_VERSION = "0.6.1~adts3final"
 UI_SAFE_MODE_MARKER = b"ui_runtime_hooks_disabled_safe_mode"
 HELPER_SAFE_MODE_MARKER = b"adts3final_socket_hooks_only"
 
@@ -160,7 +160,15 @@ def main() -> int:
     expected_scripts = {
         "postinst": (
             PACKAGE_VERSION.encode("ascii"),
-            b"source_ready_file",
+            b"bluetoothd_injection_confirmed",
+            b"bluetoothd_injection_failed",
+            b"kickstart -k system/com.apple.bluetoothd",
+            b"resolve_tool",
+            b"plist_field",
+            b"source=$(plist_field",
+            b"version=$(plist_field",
+            b"pid=$(plist_field",
+            b"old_pid",
             b"claim-*",
             b"daemon_direct_fallback_begin",
             b"daemon_direct_fallback_status",
@@ -210,6 +218,17 @@ def main() -> int:
                 raise ValueError(
                     f"{script_name} is missing markers: {missing_markers}"
                 )
+            if script_name == "postinst":
+                stale_markers = [
+                    marker
+                    for marker in (b"source_ready_file", b"wait_for_daemon")
+                    if marker in data
+                ]
+                if stale_markers:
+                    raise ValueError(
+                        "postinst still contains weak readiness checks: "
+                        f"{stale_markers}"
+                    )
             if b"heard" in data.lower():
                 raise ValueError(
                     f"{script_name} still contains legacy heard handling"

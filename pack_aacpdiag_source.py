@@ -9,14 +9,18 @@ import tarfile
 ROOT = pathlib.Path(__file__).resolve().parent
 SOURCE = ROOT / "aacpdiag"
 ARCHIVE = ROOT / "aacpdiag-source.tar.gz"
-PACKAGE_VERSION = "0.6.0~adts3final"
+PACKAGE_VERSION = "0.6.1~adts3final"
 DIAGNOSTIC_MARKER = "adts3final_socket_hooks_only"
+EXCLUDED_SOURCE_FILES = {
+    "aacpdiag/ui/Tweak_dump.txt",
+}
 
 
 def is_source_file(path: pathlib.Path) -> bool:
     relative = path.relative_to(ROOT)
     return (
         path.is_file()
+        and relative.as_posix() not in EXCLUDED_SOURCE_FILES
         and "__pycache__" not in relative.parts
         and path.suffix != ".pyc"
     )
@@ -113,7 +117,15 @@ def main() -> int:
     script_markers = {
         "aacpdiag/layout/DEBIAN/postinst": (
             PACKAGE_VERSION.encode("ascii"),
-            b"source_ready_file",
+            b"bluetoothd_injection_confirmed",
+            b"bluetoothd_injection_failed",
+            b"kickstart -k system/com.apple.bluetoothd",
+            b"resolve_tool",
+            b"plist_field",
+            b"source=$(plist_field",
+            b"version=$(plist_field",
+            b"pid=$(plist_field",
+            b"old_pid",
             b"claim-*",
             b"daemon_direct_fallback_begin",
             b"daemon_direct_fallback_status",
@@ -151,6 +163,17 @@ def main() -> int:
             raise SystemExit(
                 f"packed script is missing markers: {script_name} {missing_markers}"
             )
+        if script_name.endswith("/postinst"):
+            stale_markers = [
+                marker
+                for marker in (b"source_ready_file", b"wait_for_daemon")
+                if marker in data
+            ]
+            if stale_markers:
+                raise SystemExit(
+                    "packed postinst still contains weak readiness checks: "
+                    f"{stale_markers}"
+                )
         if b"heard" in data.lower():
             raise SystemExit(
                 f"packed script still contains legacy heard handling: {script_name}"

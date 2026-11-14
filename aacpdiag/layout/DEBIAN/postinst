@@ -3,22 +3,46 @@
 LOG=/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.log
 BOOT_LOG=/var/tmp/com.lns.pogr.aacpdiag/helper-boot.log
 TMP_BOOT_LOG=/tmp/com.lns.pogr.aacpdiag/helper-boot.log
-PACKAGE_VERSION=0.6.0~adts3final
-PLIST=
-DAEMON=
+PACKAGE_VERSION=0.6.1~adts3final
 PACKAGE_PATH="${DPKG_ADMINDIR:-/var/lib/dpkg}/info/com.lns.pogr.aacpdiag.list"
+HELPER_PLISTS="
+/var/tmp/com.lns.pogr.aacpdiag/helper-bluetoothd.plist
+/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper-bluetoothd.plist
+/tmp/com.lns.pogr.aacpdiag/helper-bluetoothd.plist
+"
 
+LOG_DIR=${LOG%/*}
+
+resolve_tool() {
+	relative=$1
+	for candidate in "/var/jb/$relative" "/$relative"; do
+		if [ -x "$candidate" ]; then
+			printf '%s\n' "$candidate"
+			return 0
+		fi
+	done
+	return 1
+}
+
+LAUNCHCTL=$(resolve_tool usr/bin/launchctl)
+KILLALL=$(resolve_tool usr/bin/killall)
+PGREP=$(resolve_tool usr/bin/pgrep)
+PLUTIL=$(resolve_tool usr/bin/plutil)
+PLISTBUDDY=$(resolve_tool usr/libexec/PlistBuddy)
+
+DAEMON_PLIST=
+DAEMON=
 for candidate in \
 	/var/jb/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist \
 	/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist
 do
 	if [ -f "$candidate" ]; then
-		PLIST=$candidate
+		DAEMON_PLIST=$candidate
 		break
 	fi
 done
-if [ -z "$PLIST" ]; then
-	PLIST=/var/jb/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist
+if [ -z "$DAEMON_PLIST" ]; then
+	DAEMON_PLIST=/var/jb/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist
 fi
 
 for candidate in \
@@ -34,8 +58,7 @@ if [ -z "$DAEMON" ]; then
 	DAEMON=/var/jb/usr/bin/aacpdiagd
 fi
 
-mkdir -p \
-	/var/mobile/Library/Preferences \
+mkdir -p "$LOG_DIR" \
 	/var/tmp/com.lns.pogr.aacpdiag \
 	/tmp/com.lns.pogr.aacpdiag
 chmod 0777 /var/tmp/com.lns.pogr.aacpdiag /tmp/com.lns.pogr.aacpdiag
@@ -48,6 +71,25 @@ log_line() {
 	done
 }
 
+helper_pid() {
+	[ -n "$PGREP" ] || return 1
+	"$PGREP" -x bluetoothd 2>/dev/null | sed -n '1p'
+}
+
+plist_field() {
+	path=$1
+	key=$2
+	if [ -n "$PLUTIL" ]; then
+		"$PLUTIL" -extract "$key" raw "$path" 2>/dev/null |
+			sed -n '1p'
+	elif [ -n "$PLISTBUDDY" ]; then
+		"$PLISTBUDDY" -c "Print :$key" "$path" 2>/dev/null |
+			sed -n '1p'
+	else
+		return 1
+	fi
+}
+
 rewrite_daemon_plist() {
 	plist=$1
 	executable=$2
@@ -56,9 +98,9 @@ rewrite_daemon_plist() {
 		return 1
 	fi
 
-	if command -v plutil >/dev/null 2>&1; then
+	if [ -n "$PLUTIL" ]; then
 		log_line "daemon_plist_rewrite_begin tool=plutil plist=$plist executable=$executable"
-		plutil -replace ProgramArguments.0 -string "$executable" "$plist" >> "$LOG" 2>&1
+		"$PLUTIL" -replace ProgramArguments.0 -string "$executable" "$plist" >> "$LOG" 2>&1
 		status=$?
 		log_line "daemon_plist_rewrite_status tool=plutil status=$status"
 		if [ "$status" -eq 0 ]; then
@@ -66,21 +108,15 @@ rewrite_daemon_plist() {
 		fi
 	fi
 
-	for buddy in \
-		/usr/libexec/PlistBuddy \
-		/var/jb/usr/libexec/PlistBuddy
-	do
-		if [ -x "$buddy" ]; then
-			log_line "daemon_plist_rewrite_begin tool=PlistBuddy path=$buddy plist=$plist executable=$executable"
-			"$buddy" -c "Set :ProgramArguments:0 $executable" "$plist" >> "$LOG" 2>&1
-			status=$?
-			log_line "daemon_plist_rewrite_status tool=PlistBuddy status=$status"
-			if [ "$status" -eq 0 ]; then
-				return 0
-			fi
-			break
+	if [ -n "$PLISTBUDDY" ]; then
+		log_line "daemon_plist_rewrite_begin tool=PlistBuddy path=$PLISTBUDDY plist=$plist executable=$executable"
+		"$PLISTBUDDY" -c "Set :ProgramArguments:0 $executable" "$plist" >> "$LOG" 2>&1
+		status=$?
+		log_line "daemon_plist_rewrite_status tool=PlistBuddy status=$status"
+		if [ "$status" -eq 0 ]; then
+			return 0
 		fi
-	done
+	fi
 
 	temporary="${plist}.aacpdiag.$$"
 	log_line "daemon_plist_rewrite_begin tool=xml plist=$plist executable=$executable"
@@ -121,38 +157,8 @@ rewrite_daemon_plist() {
 	return 1
 }
 
-source_ready_file() {
-	for candidate in \
-		/var/tmp/com.lns.pogr.aacpdiag/helper-bluetoothd.plist \
-		/var/tmp/com.lns.pogr.aacpdiag/helper-aacpdiagd.plist \
-		/var/tmp/com.lns.pogr.aacpdiag/helper.plist \
-		/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper.plist \
-		/tmp/com.lns.pogr.aacpdiag/helper.plist
-	do
-		if [ -s "$candidate" ]; then
-			return 0
-		fi
-	done
-	return 1
-}
-
-wait_for_daemon() {
-	attempt=0
-	while [ "$attempt" -lt 10 ]; do
-		DAEMON_PID=$(pgrep -x aacpdiagd 2>/dev/null | head -n 1)
-		if [ -n "$DAEMON_PID" ]; then
-			return 0
-		fi
-		if source_ready_file; then
-			return 0
-		fi
-		attempt=$((attempt + 1))
-		sleep 1
-	done
-	return 1
-}
-
 log_line "install_begin version=$PACKAGE_VERSION package_list=$PACKAGE_PATH"
+log_line "postinst_tools launchctl=${LAUNCHCTL:-missing} killall=${KILLALL:-missing} pgrep=${PGREP:-missing} plutil=${PLUTIL:-missing} plistbuddy=${PLISTBUDDY:-missing}"
 if [ -r "$PACKAGE_PATH" ]; then
 	sed 's/^/installed_file=/' "$PACKAGE_PATH" | while IFS= read -r line; do
 		log_line "$line"
@@ -172,7 +178,7 @@ do
 	fi
 done
 
-for target in "$DAEMON" "$PLIST"; do
+for target in "$DAEMON" "$DAEMON_PLIST"; do
 	if [ -e "$target" ]; then
 		log_line "install_artifact path=$target exists=1"
 		ls -ld "$target" 2>&1 | while IFS= read -r line; do
@@ -186,6 +192,13 @@ if command -v file >/dev/null 2>&1; then
 	file "$DAEMON" 2>&1 | while IFS= read -r line; do
 		log_line "install_architecture $line"
 	done
+fi
+
+OLD_BLUETOOTHD_PID=$(helper_pid)
+if [ -n "$OLD_BLUETOOTHD_PID" ]; then
+	log_line "bluetoothd_injection_prepare old_pid=$OLD_BLUETOOTHD_PID"
+else
+	log_line "bluetoothd_injection_prepare old_pid=-"
 fi
 
 rm -f \
@@ -215,66 +228,122 @@ rm -f \
 	/tmp/com.lns.pogr.aacpdiag/helper-aacpdiagd.plist \
 	/tmp/com.lns.pogr.aacpdiag/claim-*
 
-rewrite_daemon_plist "$PLIST" "$DAEMON"
+rewrite_daemon_plist "$DAEMON_PLIST" "$DAEMON"
 
 log_line "daemon_bootout_begin label=com.lns.pogr.aacpdiagd"
-launchctl bootout system/com.lns.pogr.aacpdiagd >> "$LOG" 2>&1
-BOOTOUT_STATUS=$?
+if [ -n "$LAUNCHCTL" ]; then
+	"$LAUNCHCTL" bootout system/com.lns.pogr.aacpdiagd >> "$LOG" 2>&1
+	BOOTOUT_STATUS=$?
+else
+	BOOTOUT_STATUS=127
+fi
 log_line "daemon_bootout_status=$BOOTOUT_STATUS"
 
-if [ -f "$PLIST" ]; then
-	log_line "daemon_bootstrap_begin plist=$PLIST"
-	launchctl bootstrap system "$PLIST" >> "$LOG" 2>&1
-	BOOTSTRAP_STATUS=$?
+if [ -f "$DAEMON_PLIST" ]; then
+	log_line "daemon_bootstrap_begin plist=$DAEMON_PLIST"
+	if [ -n "$LAUNCHCTL" ]; then
+		"$LAUNCHCTL" bootstrap system "$DAEMON_PLIST" >> "$LOG" 2>&1
+		BOOTSTRAP_STATUS=$?
+	else
+		BOOTSTRAP_STATUS=127
+	fi
 	log_line "daemon_bootstrap_status=$BOOTSTRAP_STATUS"
-	if [ "$BOOTSTRAP_STATUS" -ne 0 ]; then
-		log_line "daemon_bootstrap_fallback plist=$PLIST"
-		launchctl load -w "$PLIST" >> "$LOG" 2>&1
+	if [ "$BOOTSTRAP_STATUS" -ne 0 ] && [ -n "$LAUNCHCTL" ]; then
+		log_line "daemon_bootstrap_fallback plist=$DAEMON_PLIST"
+		"$LAUNCHCTL" load -w "$DAEMON_PLIST" >> "$LOG" 2>&1
 		LOAD_STATUS=$?
 		log_line "daemon_load_status=$LOAD_STATUS"
 	fi
-	launchctl kickstart -k system/com.lns.pogr.aacpdiagd >> "$LOG" 2>&1
-	KICKSTART_STATUS=$?
+	if [ -n "$LAUNCHCTL" ]; then
+		"$LAUNCHCTL" kickstart -k system/com.lns.pogr.aacpdiagd >> "$LOG" 2>&1
+		KICKSTART_STATUS=$?
+	else
+		KICKSTART_STATUS=127
+	fi
 	log_line "daemon_kickstart_status=$KICKSTART_STATUS"
-	launchctl print system/com.lns.pogr.aacpdiagd >> "$LOG" 2>&1
-	PRINT_STATUS=$?
-	log_line "daemon_print_status=$PRINT_STATUS"
 else
-	log_line "daemon_plist_missing path=$PLIST"
+	log_line "daemon_plist_missing path=$DAEMON_PLIST"
 fi
 
-DAEMON_PID=$(pgrep -x aacpdiagd 2>/dev/null | head -n 1)
+sleep 1
+DAEMON_PID=
+if [ -n "$PGREP" ]; then
+	DAEMON_PID=$("$PGREP" -x aacpdiagd 2>/dev/null | sed -n '1p')
+fi
 if [ -z "$DAEMON_PID" ] && [ -x "$DAEMON" ]; then
 	log_line "daemon_direct_fallback_begin executable=$DAEMON"
-	DAEMON_STDOUT=/var/tmp/com.lns.pogr.aacpdiag/daemon-stdout.log
-	DAEMON_STDERR=/var/tmp/com.lns.pogr.aacpdiag/daemon-stderr.log
-	if command -v nohup >/dev/null 2>&1; then
-		nohup "$DAEMON" >>"$DAEMON_STDOUT" 2>>"$DAEMON_STDERR" </dev/null &
-	else
-		"$DAEMON" >>"$DAEMON_STDOUT" 2>>"$DAEMON_STDERR" </dev/null &
-	fi
+	"$DAEMON" >>/var/tmp/com.lns.pogr.aacpdiag/daemon-stdout.log \
+		2>>/var/tmp/com.lns.pogr.aacpdiag/daemon-stderr.log </dev/null &
 	DIRECT_START_STATUS=$?
-	sleep 1
 	log_line "daemon_direct_fallback_status=$DIRECT_START_STATUS"
-elif [ -z "$DAEMON_PID" ]; then
-	log_line "daemon_direct_fallback_skipped reason=not_executable executable=$DAEMON"
-fi
-
-if wait_for_daemon; then
-	DAEMON_PID=$(pgrep -x aacpdiagd 2>/dev/null | head -n 1)
-	log_line "daemon_process pid=${DAEMON_PID:--} state=running"
-else
-	log_line "daemon_process pid=- state=not_running ready=0"
-fi
-
-killall -TERM Preferences 2>/dev/null || true
-killall -TERM bluetoothd 2>/dev/null || true
-for process in Preferences bluetoothd; do
-	if killall -0 "$process" 2>/dev/null; then
-		log_line "process_restart_status name=$process state=still_running"
-	else
-		log_line "process_restart_status name=$process state=stopped_or_restart_pending"
+	sleep 1
+	if [ -n "$PGREP" ]; then
+		DAEMON_PID=$("$PGREP" -x aacpdiagd 2>/dev/null | sed -n '1p')
 	fi
+fi
+log_line "daemon_process pid=${DAEMON_PID:--} state=$([ -n "$DAEMON_PID" ] && echo running || echo not_running)"
+
+log_line "bluetoothd_injection_begin label=com.apple.bluetoothd"
+if [ -n "$LAUNCHCTL" ]; then
+	"$LAUNCHCTL" kickstart -k system/com.apple.bluetoothd >> "$LOG" 2>&1
+	KICKSTART_BLUETOOTHD_STATUS=$?
+	log_line "bluetoothd_kickstart_status=$KICKSTART_BLUETOOTHD_STATUS"
+else
+	KICKSTART_BLUETOOTHD_STATUS=127
+	log_line "bluetoothd_kickstart_status=127 reason=launchctl_missing"
+fi
+if [ "$KICKSTART_BLUETOOTHD_STATUS" -ne 0 ] && [ -n "$KILLALL" ]; then
+	"$KILLALL" -TERM bluetoothd >> "$LOG" 2>&1
+	KILL_BLUETOOTHD_STATUS=$?
+	log_line "bluetoothd_killall_status=$KILL_BLUETOOTHD_STATUS"
+else
+	KILL_BLUETOOTHD_STATUS=-1
+fi
+
+CONFIRMED=0
+CURRENT_BLUETOOTHD_PID=
+ATTEMPT=0
+while [ "$ATTEMPT" -lt 30 ]; do
+	ATTEMPT=$((ATTEMPT + 1))
+	CURRENT_BLUETOOTHD_PID=$(helper_pid)
+	for helper_plist in $HELPER_PLISTS; do
+		[ -s "$helper_plist" ] || continue
+		plist_source=$(plist_field "$helper_plist" source)
+		plist_version=$(plist_field "$helper_plist" version)
+		plist_pid=$(plist_field "$helper_plist" pid)
+		log_line "helper_plist_probe attempt=$ATTEMPT path=$helper_plist current_pid=${CURRENT_BLUETOOTHD_PID:--} source=${plist_source:--} version=${plist_version:--} pid=${plist_pid:--}"
+		if [ "$plist_source" != "bluetoothd" ] ||
+			[ "$plist_version" != "$PACKAGE_VERSION" ] ||
+			[ -z "$CURRENT_BLUETOOTHD_PID" ] ||
+			[ "$plist_pid" != "$CURRENT_BLUETOOTHD_PID" ]; then
+			continue
+		fi
+		if [ -n "$OLD_BLUETOOTHD_PID" ] &&
+			[ "$CURRENT_BLUETOOTHD_PID" = "$OLD_BLUETOOTHD_PID" ]; then
+			log_line "helper_plist_pid_unchanged attempt=$ATTEMPT old_pid=$OLD_BLUETOOTHD_PID current_pid=$CURRENT_BLUETOOTHD_PID"
+			continue
+		fi
+		log_line "bluetoothd_injection_confirmed pid=$CURRENT_BLUETOOTHD_PID version=$PACKAGE_VERSION path=$helper_plist"
+		CONFIRMED=1
+		break
+	done
+	if [ "$CONFIRMED" -eq 1 ]; then
+		break
+	fi
+	sleep 0.5
 done
+
+if [ "$CONFIRMED" -ne 1 ]; then
+	log_line "bluetoothd_injection_failed old_pid=${OLD_BLUETOOTHD_PID:--} current_pid=${CURRENT_BLUETOOTHD_PID:--} version=$PACKAGE_VERSION"
+	for helper_plist in $HELPER_PLISTS; do
+		if [ -s "$helper_plist" ]; then
+			log_line "bluetoothd_injection_failed_plist path=$helper_plist source=$(plist_field "$helper_plist" source) version=$(plist_field "$helper_plist" version) pid=$(plist_field "$helper_plist" pid)"
+		fi
+	done
+fi
+
+if [ -n "$KILLALL" ]; then
+	"$KILLALL" -TERM Preferences >> "$LOG" 2>&1 || true
+fi
 
 exit 0

@@ -1,4 +1,4 @@
-# PodsGrant AACP Diagnostics 0.6.0~adts3final
+# PodsGrant AACP Diagnostics 0.6.1~adts3final
 
 RootHide-compatible diagnostic package for sending the AirPods adaptive
 transparency listening-mode frame on iOS 16.2.
