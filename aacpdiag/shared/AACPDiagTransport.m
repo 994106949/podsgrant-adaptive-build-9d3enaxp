@@ -40,12 +40,15 @@ static const uint8_t AAPDiagAACPHeader[] = {0x04, 0x00, 0x04, 0x00};
 static const uint8_t AAPDiagListeningConfigID = 0x1A;
 static const uint8_t AAPDiagListeningModeID = 0x0D;
 
+#if !defined(AACPDIAG_TRANSPORT_NO_ACTIVE_FD) || \
+	!AACPDIAG_TRANSPORT_NO_ACTIVE_FD
 static uint64_t AAPDiagTransportMonotonicMicroseconds(void) {
 	struct timespec value = {0};
 	clock_gettime(CLOCK_MONOTONIC, &value);
 	return (uint64_t)value.tv_sec * 1000000ULL +
 		(uint64_t)value.tv_nsec / 1000ULL;
 }
+#endif
 
 #if !defined(AACPDIAG_TRANSPORT_NO_ACTIVE_FD) || \
 	!AACPDIAG_TRANSPORT_NO_ACTIVE_FD
@@ -296,6 +299,8 @@ static NSDictionary<NSString *, id> *AAPDiagFindSettingInFrames(
 	return last;
 }
 
+#if !defined(AACPDIAG_TRANSPORT_NO_ACTIVE_FD) || \
+	!AACPDIAG_TRANSPORT_NO_ACTIVE_FD
 static NSDictionary<NSString *, id> *AAPDiagRunActiveDescriptorTransport(
 	NSString *address,
 	unsigned int mode,
@@ -398,6 +403,22 @@ static NSDictionary<NSString *, id> *AAPDiagRunActiveDescriptorTransport(
 		@"mode_sent_us": @(modeSentAt),
 	};
 }
+#else
+static NSDictionary<NSString *, id> *AAPDiagRunActiveDescriptorTransport(
+	NSString *address,
+	unsigned int mode,
+	NSMutableArray<NSString *> *trace,
+	NSMutableArray<NSString *> *packets) {
+	(void)address;
+	(void)mode;
+	(void)packets;
+	[trace addObject:@"active_fd_disabled_for_daemon"];
+	return @{
+		@"available": @NO,
+		@"reason": @"compiled_without_active_fd",
+	};
+}
+#endif
 
 #if !defined(AACPDIAG_TRANSPORT_NO_ACTIVE_FD) || \
 	!AACPDIAG_TRANSPORT_NO_ACTIVE_FD
