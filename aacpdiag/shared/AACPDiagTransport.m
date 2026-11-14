@@ -36,7 +36,10 @@ struct AAPDiagL2CapAddressAlt {
 } __attribute__((packed));
 #endif
 
+#if !defined(AACPDIAG_TRANSPORT_NO_ACTIVE_FD) || \
+	!AACPDIAG_TRANSPORT_NO_ACTIVE_FD
 static const uint8_t AAPDiagAACPHeader[] = {0x04, 0x00, 0x04, 0x00};
+#endif
 static const uint8_t AAPDiagListeningConfigID = 0x1A;
 static const uint8_t AAPDiagListeningModeID = 0x0D;
 
@@ -234,6 +237,8 @@ static NSData *AAPDiagFrame(uint8_t settingID, uint8_t value) {
 	return [NSData dataWithBytes:bytes length:sizeof(bytes)];
 }
 
+#if !defined(AACPDIAG_TRANSPORT_NO_ACTIVE_FD) || \
+	!AACPDIAG_TRANSPORT_NO_ACTIVE_FD
 static BOOL AAPDiagPacketMatches(NSData *packet,
 	uint8_t settingID,
 	NSNumber **modeValue) {
@@ -252,7 +257,10 @@ static BOOL AAPDiagPacketMatches(NSData *packet,
 	}
 	return YES;
 }
+#endif
 
+#if !defined(AACPDIAG_TRANSPORT_NO_ACTIVE_FD) || \
+	!AACPDIAG_TRANSPORT_NO_ACTIVE_FD
 static NSDictionary<NSString *, id> *AAPDiagMatchRXFrame(
 	NSDictionary<NSString *, id> *frame,
 	uint8_t settingID,
@@ -298,6 +306,7 @@ static NSDictionary<NSString *, id> *AAPDiagFindSettingInFrames(
 	}
 	return last;
 }
+#endif
 
 #if !defined(AACPDIAG_TRANSPORT_NO_ACTIVE_FD) || \
 	!AACPDIAG_TRANSPORT_NO_ACTIVE_FD
