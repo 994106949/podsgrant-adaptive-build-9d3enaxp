@@ -54,6 +54,11 @@ static void AAPDiagHandleRequest(void) {
 			sequence,
 			address ?: @"nil",
 			mode);
+		AAPDiagLog(@"diag_marker source=helper event=request_received "
+			@"sequence=%llu address=%@ mode=%u",
+			sequence,
+			address ?: @"nil",
+			mode);
 		if (!address.length || sequence == 0) {
 			return;
 		}
@@ -91,6 +96,7 @@ static void AAPDiagDarwinCallback(CFNotificationCenterRef center,
 	}
 
 	AAPDiagLog(@"helper_loaded executable=%s", executablePath);
+	AAPDiagInstallRuntimeHooks();
 	CFNotificationCenterAddObserver(
 		CFNotificationCenterGetDarwinNotifyCenter(),
 		NULL,

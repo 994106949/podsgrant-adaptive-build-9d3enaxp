@@ -91,16 +91,6 @@ static BOOL AAPDiagResultHasProtocolACK(NSDictionary *result) {
 	return [result[@"status"] isEqualToString:@"protocol_ack"];
 }
 
-static BOOL AAPDiagNativeConfirmed(NSDictionary *result) {
-	if (![result isKindOfClass:[NSDictionary class]]) {
-		return NO;
-	}
-	NSDictionary *after = result[@"after"];
-	return [result[@"status"] isEqualToString:@"native_confirmed"] &&
-		[after isKindOfClass:[NSDictionary class]] &&
-		[after[@"matches"] boolValue];
-}
-
 static NSDictionary *AAPDiagWaitForHelperResult(
 	unsigned long long sequence,
 	NSTimeInterval timeout) {
@@ -169,7 +159,7 @@ static NSDictionary *AAPDiagRunCombinedTest(
 				NULL,
 				true);
 			NSDictionary *helperResult =
-				AAPDiagWaitForHelperResult(sequence, 7.0);
+				AAPDiagWaitForHelperResult(sequence, 20.0);
 			combined[@"helper"] = helperResult ?: @{
 				@"status": @"helper_timeout",
 			};
@@ -184,9 +174,11 @@ static NSDictionary *AAPDiagRunCombinedTest(
 	BOOL localACK = AAPDiagResultHasProtocolACK(localResult);
 	NSDictionary *helperResult = combined[@"helper"];
 	BOOL helperACK = AAPDiagResultHasProtocolACK(helperResult);
-	combined[@"status"] = AAPDiagNativeConfirmed(nativeResult)
-		? @"native_confirmed"
-		: ((localACK || helperACK) ? @"protocol_ack" : @"no_confirmation");
+	BOOL localGetterOnly =
+		[nativeResult[@"status"] isEqualToString:@"local_getter_only"];
+	combined[@"status"] = (localACK || helperACK)
+		? @"protocol_ack"
+		: (localGetterOnly ? @"local_getter_only" : @"no_confirmation");
 
 	BOOL finalGetterAvailable = NO;
 	unsigned int finalGetter =
@@ -222,11 +214,10 @@ static void AAPDiagShowResult(BTSDeviceConfigController *controller,
 	button.enabled = YES;
 	button.title = @"AACP";
 
-	BOOL nativeConfirmed = AAPDiagNativeConfirmed(result[@"native"]);
 	BOOL ack = AAPDiagResultHasProtocolACK(result);
 	NSString *title = [NSString stringWithFormat:@"AACP %@: %@",
 		AAPDiagModeName(mode),
-		nativeConfirmed ? @"Confirmed" : (ack ? @"Protocol ACK" : @"No Confirmation")];
+		ack ? @"Protocol ACK" : @"No Confirmation"];
 	NSDictionary *native = [result[@"native"] isKindOfClass:[NSDictionary class]]
 		? result[@"native"]
 		: @{};
@@ -237,7 +228,7 @@ static void AAPDiagShowResult(BTSDeviceConfigController *controller,
 		? native[@"after"]
 		: @{};
 	NSString *message = [NSString stringWithFormat:
-		@"Native: %@\nNative before: %@\nNative after: %@\n"
+		@"Native: %@\nLocal getter (informational only): %@ -> %@\n"
 		@"Local: %@\nHelper: %@\n\nLog: %@",
 		native[@"status"] ?: @"none",
 		before[@"description"] ?: @"unavailable",
@@ -307,6 +298,8 @@ static void AAPDiagShowResult(BTSDeviceConfigController *controller,
 		@YES,
 		OBJC_ASSOCIATION_RETAIN_NONATOMIC);
 	unsigned int mode = modeNumber.unsignedIntValue;
+	AAPDiagLog(@"diag_marker source=aacp_ui event=test_start mode=%u",
+		mode);
 	button.enabled = NO;
 	button.title = [NSString stringWithFormat:@"Testing %@",
 		AAPDiagModeName(mode)];

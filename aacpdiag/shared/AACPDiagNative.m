@@ -59,13 +59,38 @@ static NSArray<NSString *> *AAPDiagMatchingMethods(Class cls) {
 	return result;
 }
 
+static NSArray<NSString *> *AAPDiagMatchingClassMethods(Class cls) {
+	NSMutableArray<NSString *> *result = [NSMutableArray array];
+	if (!cls) {
+		return result;
+	}
+
+	unsigned int count = 0;
+	Method *methods = class_copyMethodList(object_getClass(cls), &count);
+	for (unsigned int index = 0; index < count; index++) {
+		NSString *name = NSStringFromSelector(method_getName(methods[index]));
+		if (!AAPDiagSelectorMentionsListening(name)) {
+			continue;
+		}
+		const char *types = method_getTypeEncoding(methods[index]);
+		[result addObject:[NSString stringWithFormat:@"+%@ %s",
+			name,
+			types ?: ""]];
+	}
+	free(methods);
+	return result;
+}
+
 static NSDictionary<NSString *, id> *AAPDiagClassInventory(id object) {
 	if (!object) {
 		return @{@"class": @"nil"};
 	}
 	NSMutableDictionary<NSString *, id> *inventory =
 		[NSMutableDictionary dictionary];
-	Class cls = object_getClass(object);
+	BOOL isClassObject = class_isMetaClass(object_getClass(object));
+	Class cls = isClassObject ? (Class)object : object_getClass(object);
+	Class rootClass = cls;
+	NSString *rootClassName = cls ? NSStringFromClass(cls) : nil;
 	NSMutableArray<NSString *> *hierarchy = [NSMutableArray array];
 	NSMutableDictionary<NSString *, NSArray<NSString *> *> *methods =
 		[NSMutableDictionary dictionary];
@@ -78,9 +103,17 @@ static NSDictionary<NSString *, id> *AAPDiagClassInventory(id object) {
 		}
 		cls = class_getSuperclass(cls);
 	}
-	inventory[@"class"] = NSStringFromClass(object_getClass(object)) ?: @"?";
+	inventory[@"class"] = rootClassName ?: @"?";
+	inventory[@"is_class"] = @(isClassObject);
 	inventory[@"hierarchy"] = hierarchy;
 	inventory[@"methods"] = methods;
+	if (isClassObject && rootClass) {
+		NSArray<NSString *> *classMethods =
+			AAPDiagMatchingClassMethods(rootClass);
+		if (classMethods.count) {
+			inventory[@"class_methods"] = classMethods;
+		}
+	}
 	return inventory;
 }
 
@@ -99,6 +132,30 @@ static NSArray<NSString *> *AAPDiagSelectorAvailability(id object) {
 		[result addObject:[NSString stringWithFormat:@"%@=%@", name, marker]];
 	}
 	return result;
+}
+
+void AAPDiagLogClassInventory(NSString *scope, id object) {
+	if (!object) {
+		AAPDiagLog(@"inventory scope=%@ object=nil", scope ?: @"?");
+		return;
+	}
+	NSDictionary<NSString *, id> *inventory = AAPDiagClassInventory(object);
+	NSString *json = nil;
+	NSData *data = [NSJSONSerialization
+		dataWithJSONObject:inventory
+		options:0
+		error:nil];
+	if (data) {
+		json = [[NSString alloc] initWithData:data
+			encoding:NSUTF8StringEncoding];
+	}
+	AAPDiagLog(@"inventory scope=%@ address=%p class=%@ selectors=%@ "
+		@"methods=%@",
+		scope ?: @"?",
+		object,
+		inventory[@"class"] ?: @"?",
+		AAPDiagSelectorAvailability(object),
+		json ?: @"serialization_failed");
 }
 
 static BOOL AAPDiagReadGetter(id target,
@@ -307,7 +364,7 @@ NSDictionary<NSString *, id> *AAPDiagRunNativeTest(id device,
 	NSMutableArray<NSString *> *trace = [NSMutableArray array];
 	NSMutableDictionary<NSString *, id> *result =
 		[NSMutableDictionary dictionary];
-	result[@"status"] = @"native_unconfirmed";
+	result[@"status"] = @"no_confirmation";
 	result[@"mode"] = @(mode);
 	result[@"trace"] = trace;
 	result[@"timestamp"] = @([[NSDate date] timeIntervalSince1970]);
@@ -393,8 +450,11 @@ NSDictionary<NSString *, id> *AAPDiagRunNativeTest(id device,
 		mode,
 		&modeReturn,
 		&modeError);
+	BOOL setterAvailable =
+		[device respondsToSelector:NSSelectorFromString(@"setListeningMode:")];
 	result[@"set_mode"] = @{
 		@"invoked": @(modeOK),
+		@"available": @(setterAvailable),
 		@"return": modeReturn ?: @"",
 		@"error": modeError ?: @"",
 	};
@@ -443,10 +503,17 @@ NSDictionary<NSString *, id> *AAPDiagRunNativeTest(id device,
 		@"matches": @(confirmed),
 		@"requested": @(mode),
 	};
-	result[@"status"] = confirmed ? @"native_confirmed"
-		: (modeOK ? @"native_no_readback" : @"native_setter_missing");
+	if (!setterAvailable) {
+		result[@"status"] = @"native_setter_missing";
+	} else if (!modeOK) {
+		result[@"status"] = @"native_setter_failed";
+	} else if (confirmed) {
+		result[@"status"] = @"local_getter_only";
+	} else {
+		result[@"status"] = @"native_getter_mismatch";
+	}
 	[trace addObject:[NSString stringWithFormat:
-		@"native_result status=%@ requested=%u final=%lld",
+		@"native_result status=%@ requested=%u final=%lld (getter is not device confirmation)",
 		result[@"status"],
 		mode,
 		last]];

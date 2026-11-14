@@ -365,6 +365,9 @@ NSDictionary<NSString *, id> *AAPDiagRunTransportTest(NSString *address,
 		@"transport_start address=%@ mode=%u",
 		normalized ?: @"nil",
 		mode]];
+	AAPDiagLog(@"diag_marker source=aacp_transport event=request mode=%u address=%@",
+		mode,
+		normalized ?: @"nil");
 
 	if (mode < AAPDiagModeNoiseCancellation ||
 		mode > AAPDiagModeAdaptive) {
@@ -432,8 +435,10 @@ NSDictionary<NSString *, id> *AAPDiagRunTransportTest(NSString *address,
 	close(fd);
 
 	NSString *status = @"no_earbud_ack";
-	if (modeAck) {
+	if (modeAck && [modeAck[@"echo_matches"] boolValue]) {
 		status = @"protocol_ack";
+	} else if (modeAck) {
+		status = @"protocol_reply_mismatch";
 	} else if (!configSent || !modeSent) {
 		status = @"send_failed";
 	}
