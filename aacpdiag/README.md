@@ -1,9 +1,10 @@
-# PodsGrant AACP Diagnostics 0.5.8 diag8
+# PodsGrant AACP Diagnostics 0.5.8 diag9
 
 RootHide diagnostic package for testing AirPods AACP listening-mode frames.
 
 Open Settings, connect the AirPods, open the accessory detail page, and tap
-**AACP** in the navigation bar. Test ANC and Transparency before Adaptive.
+**AACP** in the navigation bar. The first action enables Adaptive Transparency
+through the native listening-mode and adaptive setters.
 
 ## Transport flow
 
@@ -47,7 +48,6 @@ The Settings alert uses these result levels:
 
 - `Protocol ACK`: a matching AACP reply was decoded
 - `Native Setter Invoked / Unconfirmed`: a private setter ran, but no ACK
-- `Local Getter Only`: a local property was read back, not device confirmation
 - `Device Missing`: no live object matched the AirPods address
 - `Setter Missing`: no supported listening-mode setter was found
 
@@ -56,8 +56,12 @@ Mismatched mode bytes are reported as `protocol_reply_mismatch`.
 the 30-second UI deadline. `transport_not_loaded` means no helper or daemon
 published readiness.
 
-Adaptive mode `0x0D 04` is tested only after ANC and Transparency answer. A
-protocol ACK confirms matching bytes, not an audible result.
+The Adaptive action writes `setListeningModeConfigs: 0x0F`, calls
+`setListeningMode:error:` with mode `4`, sends an accessory update, enables
+`setAdaptiveTransparencyEnabled:`, and sends a second update. The device-level
+getters are shown before and after the calls but remain informational. Only a
+matching AACP `protocol_ack` confirms the protocol exchange, and even that does
+not prove an audible result.
 
 ## Logs
 

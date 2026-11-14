@@ -3,17 +3,35 @@
 LOG=/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.log
 BOOT_LOG=/var/tmp/com.lns.pogr.aacpdiag/helper-boot.log
 TMP_BOOT_LOG=/tmp/com.lns.pogr.aacpdiag/helper-boot.log
-PACKAGE_VERSION=0.5.8~adts3diag8
-PLIST=/var/jb/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist
-DAEMON=/var/jb/usr/bin/aacpdiagd
+PACKAGE_VERSION=0.5.8~adts3diag9
+PLIST=
+DAEMON=
 PACKAGE_PATH="${DPKG_ADMINDIR:-/var/lib/dpkg}/info/com.lns.pogr.aacpdiag.list"
 
-if [ ! -x "$DAEMON" ] && [ -x /usr/bin/aacpdiagd ]; then
-	DAEMON=/usr/bin/aacpdiagd
+for candidate in \
+	/var/jb/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist \
+	/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist
+do
+	if [ -f "$candidate" ]; then
+		PLIST=$candidate
+		break
+	fi
+done
+if [ -z "$PLIST" ]; then
+	PLIST=/var/jb/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist
 fi
-if [ ! -f "$PLIST" ] &&
-	[ -f /Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist ]; then
-	PLIST=/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist
+
+for candidate in \
+	/var/jb/usr/bin/aacpdiagd \
+	/usr/bin/aacpdiagd
+do
+	if [ -x "$candidate" ]; then
+		DAEMON=$candidate
+		break
+	fi
+done
+if [ -z "$DAEMON" ]; then
+	DAEMON=/var/jb/usr/bin/aacpdiagd
 fi
 
 mkdir -p \
@@ -28,6 +46,79 @@ log_line() {
 	for target in "$LOG" "$BOOT_LOG" "$TMP_BOOT_LOG"; do
 		echo "$(date '+%Y-%m-%d %H:%M:%S.000') pid=$$ [postinst] $*" >> "$target"
 	done
+}
+
+rewrite_daemon_plist() {
+	plist=$1
+	executable=$2
+	if [ ! -f "$plist" ] || [ ! -w "$plist" ]; then
+		log_line "daemon_plist_rewrite_skipped plist=$plist executable=$executable"
+		return 1
+	fi
+
+	if command -v plutil >/dev/null 2>&1; then
+		log_line "daemon_plist_rewrite_begin tool=plutil plist=$plist executable=$executable"
+		plutil -replace ProgramArguments.0 -string "$executable" "$plist" >> "$LOG" 2>&1
+		status=$?
+		log_line "daemon_plist_rewrite_status tool=plutil status=$status"
+		if [ "$status" -eq 0 ]; then
+			return 0
+		fi
+	fi
+
+	for buddy in \
+		/usr/libexec/PlistBuddy \
+		/var/jb/usr/libexec/PlistBuddy
+	do
+		if [ -x "$buddy" ]; then
+			log_line "daemon_plist_rewrite_begin tool=PlistBuddy path=$buddy plist=$plist executable=$executable"
+			"$buddy" -c "Set :ProgramArguments:0 $executable" "$plist" >> "$LOG" 2>&1
+			status=$?
+			log_line "daemon_plist_rewrite_status tool=PlistBuddy status=$status"
+			if [ "$status" -eq 0 ]; then
+				return 0
+			fi
+			break
+		fi
+	done
+
+	temporary="${plist}.aacpdiag.$$"
+	log_line "daemon_plist_rewrite_begin tool=xml plist=$plist executable=$executable"
+	if awk -v executable="$executable" '
+		/<key>ProgramArguments<\/key>/ {
+			after_arguments = 1
+			print
+			next
+		}
+		after_arguments && /<array>/ {
+			in_arguments = 1
+			print
+			next
+		}
+		after_arguments && in_arguments && /<string>/ && !replaced {
+			indent = $0
+			sub(/<string>.*/, "", indent)
+			print indent "<string>" executable "</string>"
+			replaced = 1
+			next
+		}
+		after_arguments && in_arguments && /<\/array>/ {
+			in_arguments = 0
+			after_arguments = 0
+			print
+			next
+		}
+		{ print }
+	' "$plist" > "$temporary" &&
+		grep -Fq "<string>$executable</string>" "$temporary"; then
+		mv -f "$temporary" "$plist"
+		chmod 0644 "$plist" 2>/dev/null || true
+		log_line "daemon_plist_rewrite_status tool=xml status=0"
+		return 0
+	fi
+	rm -f "$temporary"
+	log_line "daemon_plist_rewrite_status tool=xml status=1"
+	return 1
 }
 
 source_ready_file() {
@@ -130,6 +221,8 @@ rm -f \
 	/tmp/com.lns.pogr.aacpdiag/helper-heard.plist \
 	/tmp/com.lns.pogr.aacpdiag/helper-aacpdiagd.plist \
 	/tmp/com.lns.pogr.aacpdiag/claim-*
+
+rewrite_daemon_plist "$PLIST" "$DAEMON"
 
 log_line "daemon_bootout_begin label=com.lns.pogr.aacpdiagd"
 launchctl bootout system/com.lns.pogr.aacpdiagd >> "$LOG" 2>&1

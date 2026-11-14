@@ -72,6 +72,8 @@ def main() -> int:
             "aacpdiag/helper/Tweak.x",
             "aacpdiag/daemon/main.m",
             "aacpdiag/shared/AACPDiagCommon.m",
+            "aacpdiag/shared/AACPDiagNative.m",
+            "aacpdiag/ui/Tweak.x",
         ):
             member = archive.extractfile(source_name)
             if member is None:
@@ -81,16 +83,27 @@ def main() -> int:
     missing = sorted(required - names)
     if missing:
         raise SystemExit(f"packed archive is missing files: {missing}")
-    if version != ["Version: 0.5.8~adts3diag8"]:
+    if version != ["Version: 0.5.8~adts3diag9"]:
         raise SystemExit(f"unexpected packed version: {version}")
     script_markers = {
         "aacpdiag/layout/DEBIAN/postinst": (
-            b"0.5.8~adts3diag8",
+            b"0.5.8~adts3diag9",
             b"source_ready_file",
             b"claim-*",
             b"daemon_direct_fallback_begin",
             b"daemon_direct_fallback_status",
+            b"/var/jb/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist",
+            b"/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist",
             b"/var/jb/usr/bin/aacpdiagd",
+            b"/usr/bin/aacpdiagd",
+            b"plutil",
+            b"PlistBuddy",
+            b"ProgramArguments",
+            b"daemon_plist_rewrite_begin",
+            b"bootout",
+            b"bootstrap",
+            b"kickstart",
+            b"${DPKG_ADMINDIR:-/var/lib/dpkg}/info/com.lns.pogr.aacpdiag.list",
         ),
         "aacpdiag/layout/DEBIAN/postrm": (
             b"claim-*",
@@ -129,6 +142,27 @@ def main() -> int:
             b"claim-%llu",
             b"result_written",
             b"result-%@.plist",
+            b"0.5.8~adts3diag9",
+        ),
+        "aacpdiag/shared/AACPDiagNative.m": (
+            b"setListeningMode:error:",
+            b"setListeningMode:",
+            b"sendUpdateToAccessory",
+            b"setAdaptiveTransparencyEnabled:",
+            b"getter_before",
+            b"getter_after",
+            b"native_setter_invoked_unconfirmed",
+            b"informational_only",
+        ),
+        "aacpdiag/ui/Tweak.x": (
+            b"Enable Adaptive Transparency",
+            b"Test ANC",
+            b"Test Transparency",
+            b"getter_before",
+            b"getter_after",
+            b"send_update_after_mode",
+            b"send_update_after_adaptive",
+            b"set_adaptive_transparency",
         ),
     }
     for source_name, markers in source_markers.items():

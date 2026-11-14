@@ -844,6 +844,6 @@ void AAPDiagInstallRuntimeHooks(void) {
 				});
 		}
 		AAPDiagLog(@"diag_marker phase=runtime_hooks_installed "
-			@"marker=diag8_helper_transport");
+			@"marker=diag9_direct_adaptive_transport");
 	});
 }

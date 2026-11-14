@@ -487,113 +487,444 @@ static BOOL AAPDiagReadGetter(id target,
 	return YES;
 }
 
+static const char *AAPDiagUnqualifiedType(const char *type) {
+	if (!type) {
+		return NULL;
+	}
+	while (*type && strchr("rnNoORV", *type)) {
+		type++;
+	}
+	return type;
+}
+
+static BOOL AAPDiagSetNumericInvocationArgument(
+	NSInvocation *invocation,
+	const char *rawType,
+	unsigned int argument,
+	NSString **error) {
+	const char *type = AAPDiagUnqualifiedType(rawType);
+	if (!type || !*type) {
+		if (error) {
+			*error = @"missing numeric argument type";
+		}
+		return NO;
+	}
+	switch (*type) {
+		case 'c': {
+			int8_t value = (int8_t)argument;
+			[invocation setArgument:&value atIndex:2];
+			return YES;
+		}
+		case 'C':
+		case 'B': {
+			uint8_t value = (uint8_t)argument;
+			[invocation setArgument:&value atIndex:2];
+			return YES;
+		}
+		case 's': {
+			int16_t value = (int16_t)argument;
+			[invocation setArgument:&value atIndex:2];
+			return YES;
+		}
+		case 'S': {
+			uint16_t value = (uint16_t)argument;
+			[invocation setArgument:&value atIndex:2];
+			return YES;
+		}
+		case 'i': {
+			int32_t value = (int32_t)argument;
+			[invocation setArgument:&value atIndex:2];
+			return YES;
+		}
+		case 'I': {
+			uint32_t value = (uint32_t)argument;
+			[invocation setArgument:&value atIndex:2];
+			return YES;
+		}
+		case 'q':
+		case 'l': {
+			int64_t value = (int64_t)argument;
+			[invocation setArgument:&value atIndex:2];
+			return YES;
+		}
+		case 'Q':
+		case 'L': {
+			uint64_t value = (uint64_t)argument;
+			[invocation setArgument:&value atIndex:2];
+			return YES;
+		}
+		case 'f': {
+			float value = (float)argument;
+			[invocation setArgument:&value atIndex:2];
+			return YES;
+		}
+		case 'd': {
+			double value = (double)argument;
+			[invocation setArgument:&value atIndex:2];
+			return YES;
+		}
+		default:
+			if (error) {
+				*error = [NSString stringWithFormat:
+					@"unsupported numeric argument type %s", type];
+			}
+			return NO;
+	}
+}
+
+static NSString *AAPDiagMethodEncoding(NSMethodSignature *signature) {
+	if (!signature) {
+		return @"";
+	}
+	NSMutableArray<NSString *> *arguments = [NSMutableArray array];
+	for (NSUInteger index = 0; index < signature.numberOfArguments; index++) {
+		const char *type = [signature getArgumentTypeAtIndex:index];
+		[arguments addObject:type
+			? [NSString stringWithUTF8String:type] ?: @"?"
+			: @"?"];
+	}
+	const char *returnType = signature.methodReturnType;
+	return [NSString stringWithFormat:@"return=%s args=%@",
+		returnType ?: "", [arguments componentsJoinedByString:@","]];
+}
+
+static BOOL AAPDiagScalarReturnSucceeded(
+	const char *rawType,
+	uint64_t raw) {
+	const char *type = AAPDiagUnqualifiedType(rawType);
+	if (!type || !*type || *type == 'v') {
+		return YES;
+	}
+	if (*type == '@') {
+		return raw != 0;
+	}
+	if (*type == '*' || *type == '^' || *type == '#') {
+		return raw != 0;
+	}
+	switch (*type) {
+		case 'c':
+			return (int8_t)raw != 0;
+		case 'C':
+		case 'B':
+			return (uint8_t)raw != 0;
+		case 's':
+			return (int16_t)raw != 0;
+		case 'S':
+			return (uint16_t)raw != 0;
+		case 'i':
+			return (int32_t)raw != 0;
+		case 'I':
+			return (uint32_t)raw != 0;
+		case 'q':
+		case 'l':
+			return (int64_t)raw != 0;
+		case 'Q':
+		case 'L':
+			return (uint64_t)raw != 0;
+		case 'f':
+		case 'd':
+			return raw != 0;
+		default:
+			return raw != 0;
+	}
+}
+
+static BOOL AAPDiagRecordInvocationReturn(
+	NSInvocation *invocation,
+	NSMethodSignature *signature,
+	NSMutableDictionary<NSString *, id> *record) {
+	const char *returnType = signature.methodReturnType;
+	record[@"return_type"] = returnType
+		? [NSString stringWithUTF8String:returnType] ?: @"?"
+		: @"";
+	if (signature.methodReturnLength == 0 ||
+		!returnType || *returnType == 'v') {
+		record[@"return"] = @"void";
+		record[@"return_success"] = @YES;
+		return YES;
+	}
+
+	uint64_t raw = 0;
+	NSUInteger length = signature.methodReturnLength;
+	if (length > sizeof(raw)) {
+		length = sizeof(raw);
+		record[@"return_truncated"] = @YES;
+	}
+	[invocation getReturnValue:&raw];
+	record[@"return_raw"] = @(raw);
+	if (*returnType == '@') {
+		__unsafe_unretained id value = nil;
+		[invocation getReturnValue:&value];
+		record[@"return"] = value
+			? [value description] ?: @"<non-nil>"
+			: @"nil";
+	} else {
+		record[@"return"] = [NSString stringWithFormat:@"0x%llx",
+			(unsigned long long)raw];
+	}
+	BOOL success = AAPDiagScalarReturnSucceeded(returnType, raw);
+	record[@"return_success"] = @(success);
+	return success;
+}
+
+static NSDictionary<NSString *, id> *AAPDiagInvokeNumericSetterResult(
+	id target,
+	SEL selector,
+	unsigned int argument) {
+	NSMutableDictionary<NSString *, id> *record =
+		[NSMutableDictionary dictionary];
+	record[@"selector"] = selector ? NSStringFromSelector(selector) : @"";
+	record[@"class"] = target
+		? NSStringFromClass(object_getClass(target)) ?: @"?"
+		: @"nil";
+	record[@"pointer"] = [NSString stringWithFormat:@"%p", target];
+	record[@"invoked"] = @NO;
+	record[@"success"] = @NO;
+	record[@"error"] = @"";
+	record[@"exception"] = @"";
+
+	if (!target || !selector || ![target respondsToSelector:selector]) {
+		record[@"available"] = @NO;
+		record[@"error"] = @"selector is unavailable";
+		return record;
+	}
+	record[@"available"] = @YES;
+	NSMethodSignature *signature = [target methodSignatureForSelector:selector];
+	record[@"type_encoding"] = AAPDiagMethodEncoding(signature);
+	if (!signature || signature.numberOfArguments != 3) {
+		record[@"error"] = @"unsupported method signature";
+		return record;
+	}
+	const char *argumentType = [signature getArgumentTypeAtIndex:2];
+	record[@"argument_type"] = argumentType
+		? [NSString stringWithUTF8String:argumentType] ?: @"?"
+		: @"";
+	NSInvocation *invocation =
+		[NSInvocation invocationWithMethodSignature:signature];
+	invocation.target = target;
+	invocation.selector = selector;
+	NSString *argumentError = nil;
+	if (!AAPDiagSetNumericInvocationArgument(
+			invocation, argumentType, argument, &argumentError)) {
+		record[@"error"] = argumentError ?: @"unsupported argument";
+		return record;
+	}
+
+	record[@"invoked"] = @YES;
+	@try {
+		[invocation invoke];
+	} @catch (NSException *exception) {
+		record[@"error"] = exception.reason ?: @"invocation raised an exception";
+		record[@"exception"] = exception.name ?: @"NSException";
+		return record;
+	}
+	BOOL returnSuccess =
+		AAPDiagRecordInvocationReturn(invocation, signature, record);
+	record[@"success"] = @(returnSuccess);
+	return record;
+}
+
 static BOOL AAPDiagInvokeSetter(id target,
 	SEL selector,
 	unsigned int argument,
 	NSString **returnDescription,
 	NSString **error) {
+	NSDictionary<NSString *, id> *result =
+		AAPDiagInvokeNumericSetterResult(target, selector, argument);
 	if (returnDescription) {
-		*returnDescription = @"";
+		*returnDescription = result[@"return"] ?: @"";
 	}
+	if (error) {
+		*error = result[@"error"] ?: @"";
+	}
+	return [result[@"invoked"] boolValue];
+}
+
+static NSDictionary<NSString *, id> *AAPDiagInvokeListeningModePair(
+	id target,
+	unsigned int mode) {
+	NSMutableDictionary<NSString *, id> *record =
+		[NSMutableDictionary dictionary];
+	record[@"selector"] = @"setListeningMode:error:";
+	record[@"class"] = target
+		? NSStringFromClass(object_getClass(target)) ?: @"?"
+		: @"nil";
+	record[@"pointer"] = [NSString stringWithFormat:@"%p", target];
+	record[@"invoked"] = @NO;
+	record[@"success"] = @NO;
+	record[@"error"] = @"";
+	record[@"exception"] = @"";
+	SEL selector = NSSelectorFromString(@"setListeningMode:error:");
 	if (!target || ![target respondsToSelector:selector]) {
-		if (error) {
-			*error = @"selector is unavailable";
-		}
-		return NO;
+		record[@"available"] = @NO;
+		record[@"error"] = @"selector is unavailable";
+		return record;
 	}
+	record[@"available"] = @YES;
 	NSMethodSignature *signature = [target methodSignatureForSelector:selector];
-	if (!signature || signature.numberOfArguments < 3) {
-		if (error) {
-			*error = @"unsupported method signature";
-		}
-		return NO;
+	record[@"type_encoding"] = AAPDiagMethodEncoding(signature);
+	if (!signature || signature.numberOfArguments != 4) {
+		record[@"error"] = @"expected four method arguments";
+		return record;
 	}
-	const char *argumentType = [signature getArgumentTypeAtIndex:2];
-	if (!argumentType) {
-		if (error) {
-			*error = @"missing argument type";
-		}
-		return NO;
+	const char *modeType = [signature getArgumentTypeAtIndex:2];
+	const char *errorType = [signature getArgumentTypeAtIndex:3];
+	record[@"argument_type"] = modeType
+		? [NSString stringWithUTF8String:modeType] ?: @"?"
+		: @"";
+	record[@"error_argument_type"] = errorType
+		? [NSString stringWithUTF8String:errorType] ?: @"?"
+		: @"";
+	const char *unqualifiedErrorType = AAPDiagUnqualifiedType(errorType);
+	if (!unqualifiedErrorType ||
+		unqualifiedErrorType[0] != '^' ||
+		(unqualifiedErrorType[1] != '@' && unqualifiedErrorType[1] != '#')) {
+		record[@"error"] = @"error argument is not an object pointer";
+		return record;
 	}
 
 	NSInvocation *invocation =
 		[NSInvocation invocationWithMethodSignature:signature];
 	invocation.target = target;
 	invocation.selector = selector;
-	switch (argumentType[0]) {
-		case 'c': {
-			int8_t value = (int8_t)argument;
-			[invocation setArgument:&value atIndex:2];
-			break;
-		}
-		case 'C':
-		case 'B': {
-			uint8_t value = (uint8_t)argument;
-			[invocation setArgument:&value atIndex:2];
-			break;
-		}
-		case 's': {
-			int16_t value = (int16_t)argument;
-			[invocation setArgument:&value atIndex:2];
-			break;
-		}
-		case 'S': {
-			uint16_t value = (uint16_t)argument;
-			[invocation setArgument:&value atIndex:2];
-			break;
-		}
-		case 'i': {
-			int32_t value = (int32_t)argument;
-			[invocation setArgument:&value atIndex:2];
-			break;
-		}
-		case 'I': {
-			uint32_t value = (uint32_t)argument;
-			[invocation setArgument:&value atIndex:2];
-			break;
-		}
-		case 'q':
-		case 'l': {
-			int64_t value = (int64_t)argument;
-			[invocation setArgument:&value atIndex:2];
-			break;
-		}
-		case 'Q':
-		case 'L': {
-			uint64_t value = (uint64_t)argument;
-			[invocation setArgument:&value atIndex:2];
-			break;
-		}
-		default:
-			if (error) {
-				*error = [NSString stringWithFormat:
-					@"unsupported argument type %s", argumentType];
-			}
-			return NO;
+	NSString *argumentError = nil;
+	if (!AAPDiagSetNumericInvocationArgument(
+			invocation, modeType, mode, &argumentError)) {
+		record[@"error"] = argumentError ?: @"unsupported mode argument";
+		return record;
 	}
-
+	__autoreleasing NSError *errorObject = nil;
+	[invocation setArgument:&errorObject atIndex:3];
+	record[@"invoked"] = @YES;
 	@try {
 		[invocation invoke];
 	} @catch (NSException *exception) {
-		if (error) {
-			*error = exception.reason ?: @"invocation raised an exception";
-		}
-		return NO;
+		record[@"error"] = exception.reason ?: @"invocation raised an exception";
+		record[@"exception"] = exception.name ?: @"NSException";
+		return record;
 	}
 
-	const char *returnType = signature.methodReturnType;
-	if (returnDescription && signature.methodReturnLength > 0 &&
-		returnType && returnType[0] != 'v') {
-		uint64_t raw = 0;
-		NSUInteger length = signature.methodReturnLength;
-		if (length > sizeof(raw)) {
-			length = sizeof(raw);
-		}
-		[invocation getReturnValue:&raw];
-		*returnDescription = [NSString stringWithFormat:@"0x%llx",
-			(unsigned long long)raw];
+	__autoreleasing NSError *returnedError = nil;
+	[invocation getArgument:&returnedError atIndex:3];
+	record[@"error_present"] = @(returnedError != nil);
+	record[@"error_domain"] = returnedError.domain ?: @"";
+	record[@"error_code"] = @(returnedError.code);
+	record[@"error_description"] =
+		returnedError.localizedDescription ?: @"";
+	if (returnedError) {
+		record[@"error"] = [NSString stringWithFormat:@"%@ (%ld): %@",
+			returnedError.domain ?: @"?",
+			(long)returnedError.code,
+			returnedError.localizedDescription ?: @""];
+	}
+	BOOL returnSuccess =
+		AAPDiagRecordInvocationReturn(invocation, signature, record);
+	record[@"success"] = @(returnSuccess && returnedError == nil);
+	return record;
+}
+
+static NSDictionary<NSString *, id> *AAPDiagInvokeNoArgument(
+	id target,
+	SEL selector) {
+	NSMutableDictionary<NSString *, id> *record =
+		[NSMutableDictionary dictionary];
+	record[@"selector"] = selector ? NSStringFromSelector(selector) : @"";
+	record[@"class"] = target
+		? NSStringFromClass(object_getClass(target)) ?: @"?"
+		: @"nil";
+	record[@"pointer"] = [NSString stringWithFormat:@"%p", target];
+	record[@"invoked"] = @NO;
+	record[@"success"] = @NO;
+	record[@"error"] = @"";
+	record[@"exception"] = @"";
+	if (!target || !selector || ![target respondsToSelector:selector]) {
+		record[@"available"] = @NO;
+		record[@"error"] = @"selector is unavailable";
+		return record;
+	}
+	record[@"available"] = @YES;
+	NSMethodSignature *signature = [target methodSignatureForSelector:selector];
+	record[@"type_encoding"] = AAPDiagMethodEncoding(signature);
+	if (!signature || signature.numberOfArguments != 2) {
+		record[@"error"] = @"expected a no-argument method";
+		return record;
+	}
+	record[@"argument_count"] = @(signature.numberOfArguments);
+	NSInvocation *invocation =
+		[NSInvocation invocationWithMethodSignature:signature];
+	invocation.target = target;
+	invocation.selector = selector;
+	record[@"invoked"] = @YES;
+	@try {
+		[invocation invoke];
+	} @catch (NSException *exception) {
+		record[@"error"] = exception.reason ?: @"invocation raised an exception";
+		record[@"exception"] = exception.name ?: @"NSException";
+		return record;
+	}
+	BOOL returnSuccess =
+		AAPDiagRecordInvocationReturn(invocation, signature, record);
+	record[@"success"] = @(returnSuccess);
+	return record;
+}
+
+static NSDictionary<NSString *, id> *AAPDiagInvokeSendUpdate(id target) {
+	return AAPDiagInvokeNoArgument(
+		target,
+		NSSelectorFromString(@"sendUpdateToAccessory"));
+}
+
+static BOOL AAPDiagListeningModePairUsable(NSDictionary *record) {
+	if (![record isKindOfClass:[NSDictionary class]]) {
+		return NO;
+	}
+	if (![record[@"invoked"] boolValue] ||
+		![record[@"success"] boolValue]) {
+		return NO;
+	}
+	if ([record[@"error_present"] boolValue] ||
+		[record[@"exception"] length]) {
+		return NO;
 	}
 	return YES;
+}
+
+static NSDictionary<NSString *, id> *
+AAPDiagInvokePreferredListeningModeSetter(id target, unsigned int mode) {
+	NSMutableDictionary<NSString *, id> *result =
+		[NSMutableDictionary dictionary];
+	result[@"pair_selector"] = @"setListeningMode:error:";
+	result[@"fallback_selector"] = @"setListeningMode:";
+	result[@"used_fallback"] = @NO;
+
+	NSDictionary<NSString *, id> *pair =
+		AAPDiagInvokeListeningModePair(target, mode);
+	result[@"pair"] = pair;
+	NSDictionary<NSString *, id> *fallback = nil;
+	if (!AAPDiagListeningModePairUsable(pair)) {
+		fallback = AAPDiagInvokeNumericSetterResult(
+			target,
+			NSSelectorFromString(@"setListeningMode:"),
+			mode);
+		result[@"used_fallback"] = @YES;
+	}
+	result[@"fallback"] = fallback ?: @{};
+
+	NSDictionary<NSString *, id> *selected = fallback ?: pair;
+	result[@"selector"] = selected[@"selector"] ?: @"";
+	result[@"invoked"] = selected[@"invoked"] ?: @NO;
+	result[@"success"] = selected[@"success"] ?: @NO;
+	result[@"return"] = selected[@"return"] ?: @"";
+	result[@"error"] = selected[@"error"] ?: @"";
+	result[@"exception"] = selected[@"exception"] ?: @"";
+	result[@"error_present"] = selected[@"error_present"] ?: @NO;
+	BOOL pairAvailable = [pair[@"available"] boolValue] ||
+		[pair[@"invoked"] boolValue];
+	BOOL fallbackAvailable = fallback &&
+		([fallback[@"available"] boolValue] ||
+		 [fallback[@"invoked"] boolValue]);
+	result[@"available"] = @(pairAvailable || fallbackAvailable);
+	return result;
 }
 
 NSDictionary<NSString *, id> *AAPDiagRunNativeTest(id device,
@@ -660,47 +991,81 @@ NSDictionary<NSString *, id> *AAPDiagRunNativeTest(id device,
 		supportedDescription ?: @"",
 		supportedError ?: @"none"]];
 
-	NSString *configReturn = @"";
-	NSString *configError = nil;
-	BOOL configOK = AAPDiagInvokeSetter(device,
-		NSSelectorFromString(@"setListeningModeConfigs:"),
-		0x0F,
-		&configReturn,
-		&configError);
-	result[@"config"] = @{
-		@"invoked": @(configOK),
-		@"return": configReturn ?: @"",
-		@"error": configError ?: @"",
-	};
+	NSDictionary<NSString *, id> *configResult =
+		AAPDiagInvokeNumericSetterResult(
+			device,
+			NSSelectorFromString(@"setListeningModeConfigs:"),
+			0x0F);
+	result[@"config"] = configResult;
+	result[@"config_setter"] = configResult;
 	[trace addObject:[NSString stringWithFormat:
-		@"setListeningModeConfigs:0x0F invoked=%d return=%@ error=%@",
-		configOK,
-		configReturn ?: @"",
-		configError ?: @"none"]];
+		@"setListeningModeConfigs:0x0F invoked=%d success=%d "
+		@"return=%@ error=%@ exception=%@",
+		[configResult[@"invoked"] boolValue],
+		[configResult[@"success"] boolValue],
+		configResult[@"return"] ?: @"",
+		configResult[@"error"] ?: @"none",
+		configResult[@"exception"] ?: @"none"]];
 
 	[NSThread sleepForTimeInterval:0.15];
 
-	NSString *modeReturn = @"";
-	NSString *modeError = nil;
-	BOOL modeOK = AAPDiagInvokeSetter(device,
-		NSSelectorFromString(@"setListeningMode:"),
-		mode,
-		&modeReturn,
-		&modeError);
-	BOOL setterAvailable =
-		[device respondsToSelector:NSSelectorFromString(@"setListeningMode:")];
-	result[@"set_mode"] = @{
-		@"invoked": @(modeOK),
-		@"available": @(setterAvailable),
-		@"return": modeReturn ?: @"",
-		@"error": modeError ?: @"",
-	};
+	NSDictionary<NSString *, id> *modeResult =
+		AAPDiagInvokePreferredListeningModeSetter(device, mode);
+	result[@"set_mode"] = modeResult;
 	[trace addObject:[NSString stringWithFormat:
-		@"setListeningMode:%u invoked=%d return=%@ error=%@",
+		@"listeningMode setter mode=%u selector=%@ invoked=%d "
+		@"success=%d return=%@ error=%@ exception=%@ "
+		@"pair=%@ fallback=%@",
 		mode,
-		modeOK,
-		modeReturn ?: @"",
-		modeError ?: @"none"]];
+		modeResult[@"selector"] ?: @"none",
+		[modeResult[@"invoked"] boolValue],
+		[modeResult[@"success"] boolValue],
+		modeResult[@"return"] ?: @"",
+		modeResult[@"error"] ?: @"none",
+		modeResult[@"exception"] ?: @"none",
+		modeResult[@"pair_selector"] ?: @"none",
+		modeResult[@"fallback_selector"] ?: @"none"]];
+
+	NSDictionary<NSString *, id> *sendUpdateAfterMode =
+		AAPDiagInvokeSendUpdate(device);
+	result[@"send_update_after_mode"] = sendUpdateAfterMode;
+	[trace addObject:[NSString stringWithFormat:
+		@"sendUpdateToAccessory after_mode invoked=%d success=%d "
+		@"return=%@ error=%@ exception=%@",
+		[sendUpdateAfterMode[@"invoked"] boolValue],
+		[sendUpdateAfterMode[@"success"] boolValue],
+		sendUpdateAfterMode[@"return"] ?: @"",
+		sendUpdateAfterMode[@"error"] ?: @"none",
+		sendUpdateAfterMode[@"exception"] ?: @"none"]];
+
+	NSDictionary<NSString *, id> *adaptiveResult = @{};
+	if (mode == AAPDiagModeAdaptive) {
+		adaptiveResult = AAPDiagInvokeNumericSetterResult(
+			device,
+			NSSelectorFromString(@"setAdaptiveTransparencyEnabled:"),
+			1);
+		result[@"set_adaptive_transparency"] = adaptiveResult;
+		[trace addObject:[NSString stringWithFormat:
+			@"setAdaptiveTransparencyEnabled:YES invoked=%d success=%d "
+			@"return=%@ error=%@ exception=%@",
+			[adaptiveResult[@"invoked"] boolValue],
+			[adaptiveResult[@"success"] boolValue],
+			adaptiveResult[@"return"] ?: @"",
+			adaptiveResult[@"error"] ?: @"none",
+			adaptiveResult[@"exception"] ?: @"none"]];
+
+		NSDictionary<NSString *, id> *sendUpdateAfterAdaptive =
+			AAPDiagInvokeSendUpdate(device);
+		result[@"send_update_after_adaptive"] = sendUpdateAfterAdaptive;
+		[trace addObject:[NSString stringWithFormat:
+			@"sendUpdateToAccessory after_adaptive invoked=%d success=%d "
+			@"return=%@ error=%@ exception=%@",
+			[sendUpdateAfterAdaptive[@"invoked"] boolValue],
+			[sendUpdateAfterAdaptive[@"success"] boolValue],
+			sendUpdateAfterAdaptive[@"return"] ?: @"",
+			sendUpdateAfterAdaptive[@"error"] ?: @"none",
+			sendUpdateAfterAdaptive[@"exception"] ?: @"none"]];
+	}
 
 	long long last = before;
 	NSString *lastDescription = beforeDescription ?: @"";
@@ -739,16 +1104,24 @@ NSDictionary<NSString *, id> *AAPDiagRunNativeTest(id device,
 		@"description": lastDescription ?: @"",
 		@"matches": @(confirmed),
 		@"requested": @(mode),
+		@"informational_only": @YES,
 	};
-	if (!setterAvailable) {
+	BOOL modeSetterAvailable = [modeResult[@"available"] boolValue];
+	BOOL modeSetterInvoked = [modeResult[@"invoked"] boolValue];
+	BOOL modeSetterSucceeded = [modeResult[@"success"] boolValue];
+	BOOL modeSetterFailed = [modeResult[@"exception"] length] > 0 ||
+		[modeResult[@"error"] length] > 0;
+	if (!modeSetterAvailable) {
 		result[@"status"] = @"native_setter_missing";
-	} else if (!modeOK) {
+	} else if (!modeSetterInvoked || !modeSetterSucceeded ||
+		modeSetterFailed) {
 		result[@"status"] = @"native_setter_failed";
 	} else {
-		result[@"status"] = @"local_getter_only";
+		result[@"status"] = @"native_setter_invoked_unconfirmed";
 	}
 	[trace addObject:[NSString stringWithFormat:
-		@"native_result status=%@ requested=%u final=%lld (getter is not device confirmation)",
+		@"native_result status=%@ requested=%u final=%lld "
+		@"getter_informational_only=1",
 		result[@"status"],
 		mode,
 		last]];
@@ -900,7 +1273,7 @@ NSDictionary<NSString *, id> *AAPDiagRunNativeTestOnCandidates(
 	NSMutableArray<NSString *> *trace = [NSMutableArray array];
 	NSMutableDictionary<NSString *, id> *result =
 		[NSMutableDictionary dictionary];
-	result[@"status"] = @"native_setters_invoked_unconfirmed";
+	result[@"status"] = @"native_setter_invoked_unconfirmed";
 	result[@"mode"] = @(mode);
 	result[@"expected_address"] =
 		AAPDiagNormalizeAddress(expectedAddress) ?: @"";
@@ -947,7 +1320,8 @@ NSDictionary<NSString *, id> *AAPDiagRunNativeTestOnCandidates(
 	}
 
 	NSMutableArray<NSDictionary *> *records = [NSMutableArray array];
-		NSUInteger modeInvocationCount = 0;
+	NSUInteger modeInvocationCount = 0;
+	NSUInteger modeFailureCount = 0;
 	for (id candidate in matched) {
 		NSMutableDictionary *record = [NSMutableDictionary dictionary];
 		NSString *className =
@@ -967,64 +1341,130 @@ NSDictionary<NSString *, id> *AAPDiagRunNativeTestOnCandidates(
 			candidate,
 			address);
 
-		NSString *configReturn = @"";
-		NSString *configError = nil;
-		BOOL configInvoked = AAPDiagInvokeSetter(
-			candidate,
-			NSSelectorFromString(@"setListeningModeConfigs:"),
-			0x0F,
-			&configReturn,
-			&configError);
-		[candidateTrace addObject:[NSString stringWithFormat:
-			@"setListeningModeConfigs:0x0F invoked=%d return=%@ error=%@",
-			configInvoked,
-			configReturn ?: @"",
-			configError ?: @"none"]];
-		NSString *modeReturn = @"";
-		NSString *modeError = nil;
-		BOOL modeInvoked = AAPDiagInvokeSetter(
-			candidate,
-			NSSelectorFromString(@"setListeningMode:"),
-			mode,
-			&modeReturn,
-			&modeError);
-		record[@"set_mode"] = @{
-			@"requested": @(mode),
-			@"invoked": @(modeInvoked),
-			@"return": modeReturn ?: @"",
-			@"error": modeError ?: @"",
+		long long before = 0;
+		NSString *beforeDescription = @"";
+		NSString *getterError = nil;
+		BOOL beforeOK = AAPDiagReadGetter(candidate,
+			NSSelectorFromString(@"listeningMode"),
+			&before,
+			&beforeDescription,
+			&getterError);
+		record[@"getter_before"] = @{
+			@"available": @(beforeOK),
+			@"value": @(before),
+			@"description": beforeDescription ?: @"",
+			@"error": getterError ?: @"",
+			@"informational_only": @YES,
 		};
+
+		NSDictionary<NSString *, id> *configResult =
+			AAPDiagInvokeNumericSetterResult(
+				candidate,
+				NSSelectorFromString(@"setListeningModeConfigs:"),
+				0x0F);
+		record[@"config_setter"] = configResult;
 		[candidateTrace addObject:[NSString stringWithFormat:
-			@"setListeningMode:%u invoked=%d return=%@ error=%@",
+			@"setListeningModeConfigs:0x0F invoked=%d success=%d "
+			@"return=%@ error=%@ exception=%@",
+			[configResult[@"invoked"] boolValue],
+			[configResult[@"success"] boolValue],
+			configResult[@"return"] ?: @"",
+			configResult[@"error"] ?: @"none",
+			configResult[@"exception"] ?: @"none"]];
+
+		[NSThread sleepForTimeInterval:0.15];
+		NSDictionary<NSString *, id> *modeResult =
+			AAPDiagInvokePreferredListeningModeSetter(candidate, mode);
+		record[@"set_mode"] = modeResult;
+		[candidateTrace addObject:[NSString stringWithFormat:
+			@"listeningMode setter mode=%u selector=%@ invoked=%d "
+			@"success=%d return=%@ error=%@ exception=%@ "
+			@"pair=%@ fallback=%@",
 			mode,
-			modeInvoked,
-			modeReturn ?: @"",
-			modeError ?: @"none"]];
+			modeResult[@"selector"] ?: @"none",
+			[modeResult[@"invoked"] boolValue],
+			[modeResult[@"success"] boolValue],
+			modeResult[@"return"] ?: @"",
+			modeResult[@"error"] ?: @"none",
+			modeResult[@"exception"] ?: @"none",
+			modeResult[@"pair_selector"] ?: @"none",
+			modeResult[@"fallback_selector"] ?: @"none"]];
+		BOOL modeInvoked = [modeResult[@"invoked"] boolValue];
+		BOOL modeSucceeded = [modeResult[@"success"] boolValue];
+		BOOL modeFailed = [modeResult[@"exception"] length] > 0 ||
+			[modeResult[@"error"] length] > 0;
 		if (modeInvoked) {
 			modeInvocationCount++;
 		}
+		if (modeFailed || !modeSucceeded) {
+			modeFailureCount++;
+		}
+
+		NSDictionary<NSString *, id> *sendUpdateAfterMode =
+			AAPDiagInvokeSendUpdate(candidate);
+		record[@"send_update_after_mode"] = sendUpdateAfterMode;
+		[candidateTrace addObject:[NSString stringWithFormat:
+			@"sendUpdateToAccessory after_mode invoked=%d success=%d "
+			@"return=%@ error=%@ exception=%@",
+			[sendUpdateAfterMode[@"invoked"] boolValue],
+			[sendUpdateAfterMode[@"success"] boolValue],
+			sendUpdateAfterMode[@"return"] ?: @"",
+			sendUpdateAfterMode[@"error"] ?: @"none",
+			sendUpdateAfterMode[@"exception"] ?: @"none"]];
 
 		if (mode == AAPDiagModeAdaptive) {
-			NSString *adaptiveReturn = @"";
-			NSString *adaptiveError = nil;
-			BOOL adaptiveInvoked = AAPDiagInvokeSetter(
-				candidate,
-				NSSelectorFromString(
-					@"setAdaptiveTransparencyEnabled:"),
-				1,
-				&adaptiveReturn,
-				&adaptiveError);
-			record[@"set_adaptive_transparency"] = @{
-				@"invoked": @(adaptiveInvoked),
-				@"return": adaptiveReturn ?: @"",
-				@"error": adaptiveError ?: @"",
-			};
+			NSDictionary<NSString *, id> *adaptiveResult =
+				AAPDiagInvokeNumericSetterResult(
+					candidate,
+					NSSelectorFromString(
+						@"setAdaptiveTransparencyEnabled:"),
+					1);
+			record[@"set_adaptive_transparency"] = adaptiveResult;
 			[candidateTrace addObject:[NSString stringWithFormat:
 				@"setAdaptiveTransparencyEnabled:YES invoked=%d "
-				@"return=%@ error=%@",
-				adaptiveInvoked,
-				adaptiveReturn ?: @"",
-				adaptiveError ?: @"none"]];
+				@"success=%d return=%@ error=%@ exception=%@",
+				[adaptiveResult[@"invoked"] boolValue],
+				[adaptiveResult[@"success"] boolValue],
+				adaptiveResult[@"return"] ?: @"",
+				adaptiveResult[@"error"] ?: @"none",
+				adaptiveResult[@"exception"] ?: @"none"]];
+
+			NSDictionary<NSString *, id> *sendUpdateAfterAdaptive =
+				AAPDiagInvokeSendUpdate(candidate);
+			record[@"send_update_after_adaptive"] =
+				sendUpdateAfterAdaptive;
+			[candidateTrace addObject:[NSString stringWithFormat:
+				@"sendUpdateToAccessory after_adaptive invoked=%d "
+				@"success=%d return=%@ error=%@ exception=%@",
+				[sendUpdateAfterAdaptive[@"invoked"] boolValue],
+				[sendUpdateAfterAdaptive[@"success"] boolValue],
+				sendUpdateAfterAdaptive[@"return"] ?: @"",
+				sendUpdateAfterAdaptive[@"error"] ?: @"none",
+				sendUpdateAfterAdaptive[@"exception"] ?: @"none"]];
+		}
+
+		long long after = 0;
+		NSString *afterDescription = @"";
+		NSString *afterError = nil;
+		BOOL afterOK = AAPDiagReadGetter(candidate,
+			NSSelectorFromString(@"listeningMode"),
+			&after,
+			&afterDescription,
+			&afterError);
+		record[@"getter_after"] = @{
+			@"available": @(afterOK),
+			@"value": @(after),
+			@"description": afterDescription ?: @"",
+			@"error": afterError ?: @"",
+			@"informational_only": @YES,
+		};
+		[candidateTrace addObject:[NSString stringWithFormat:
+			@"getter informational_only before=%lld after=%lld",
+			before,
+			after]];
+
+		if (!AAPDiagListeningModePairUsable(modeResult)) {
+			/* The selected setter may still have succeeded via fallback. */
 		}
 		record[@"trace"] = candidateTrace;
 		[records addObject:record];
@@ -1037,12 +1477,18 @@ NSDictionary<NSString *, id> *AAPDiagRunNativeTestOnCandidates(
 	}
 
 	result[@"devices"] = records;
-		result[@"setter_invocations"] = @(modeInvocationCount);
-		[trace addObject:[NSString stringWithFormat:
-			@"native_mode_setters invoked=%lu (no AACP reply captured here)",
-			(unsigned long)modeInvocationCount]];
-		if (!modeInvocationCount) {
-			result[@"status"] = @"native_setter_missing";
-		}
+	result[@"setter_invocations"] = @(modeInvocationCount);
+	[trace addObject:[NSString stringWithFormat:
+		@"native_mode_setters invoked=%lu failures=%lu "
+		@"(no AACP reply captured here)",
+		(unsigned long)modeInvocationCount,
+		(unsigned long)modeFailureCount]];
+	if (!modeInvocationCount) {
+		result[@"status"] = @"native_setter_missing";
+	} else if (modeFailureCount == matched.count) {
+		result[@"status"] = @"native_setter_failed";
+	} else {
+		result[@"status"] = @"native_setter_invoked_unconfirmed";
+	}
 	return result;
 }

@@ -151,17 +151,28 @@ def main() -> int:
     control = read_control(members)
     if control.get("Package") != "com.lns.pogr.aacpdiag":
         raise ValueError(f"unexpected Package: {control.get('Package')!r}")
-    if control.get("Version") != "0.5.8~adts3diag8":
+    if control.get("Version") != "0.5.8~adts3diag9":
         raise ValueError(f"unexpected Version: {control.get('Version')!r}")
 
     expected_scripts = {
         "postinst": (
-            b"0.5.8~adts3diag8",
+            b"0.5.8~adts3diag9",
             b"source_ready_file",
             b"claim-*",
             b"daemon_direct_fallback_begin",
             b"daemon_direct_fallback_status",
+            b"/var/jb/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist",
+            b"/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist",
             b"/var/jb/usr/bin/aacpdiagd",
+            b"/usr/bin/aacpdiagd",
+            b"plutil",
+            b"PlistBuddy",
+            b"ProgramArguments",
+            b"daemon_plist_rewrite_begin",
+            b"bootout",
+            b"bootstrap",
+            b"kickstart",
+            b"${DPKG_ADMINDIR:-/var/lib/dpkg}/info/com.lns.pogr.aacpdiag.list",
         ),
         "postrm": (
             b"claim-*",
@@ -309,24 +320,24 @@ def main() -> int:
     binary_markers = {
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiag.dylib": (
             b"source=aacp_ui",
-            b"0.5.8~adts3diag8",
+            b"0.5.8~adts3diag9",
         ),
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiagHelper.dylib": (
             b"source=helper",
-            b"0.5.8~adts3diag8",
+            b"0.5.8~adts3diag9",
         ),
         "usr/bin/aacpdiagd": (
             b"source=aacpdiagd",
-            b"0.5.8~adts3diag8",
+            b"0.5.8~adts3diag9",
         ),
     }
     runtime_markers = {
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiag.dylib": (
-            b"diag8_helper_transport",
+            b"diag9_direct_adaptive_transport",
         ),
         "Library/MobileSubstrate/DynamicLibraries/"
         "PodsGrantAACPDiagHelper.dylib": (
-            b"diag8_helper_transport",
+            b"diag9_direct_adaptive_transport",
         ),
     }
     for binary_name, markers in runtime_markers.items():

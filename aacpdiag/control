@@ -1,6 +1,6 @@
 Package: com.lns.pogr.aacpdiag
 Name: PodsGrant AACP Diagnostics
-Version: 0.5.8~adts3diag8
+Version: 0.5.8~adts3diag9
 Architecture: iphoneos-arm64e
 Description: Independent AirPods AACP L2CAP diagnostic package for RootHide
 Maintainer: Ruphane

@@ -92,6 +92,47 @@ static BOOL AAPDiagResultHasProtocolACK(NSDictionary *result) {
 	return [result[@"status"] isEqualToString:@"protocol_ack"];
 }
 
+static NSDictionary *AAPDiagDictionaryValue(id value) {
+	return [value isKindOfClass:[NSDictionary class]] ? value : @{};
+}
+
+static NSString *AAPDiagInvocationSummary(NSDictionary *record) {
+	if (![record isKindOfClass:[NSDictionary class]] || !record.count) {
+		return @"unavailable";
+	}
+	NSMutableArray<NSString *> *parts = [NSMutableArray array];
+	[parts addObject:[NSString stringWithFormat:@"invoked=%@",
+		[record[@"invoked"] boolValue] ? @"yes" : @"no"]];
+	[parts addObject:[NSString stringWithFormat:@"success=%@",
+		[record[@"success"] boolValue] ? @"yes" : @"no"]];
+	NSString *error = record[@"error"];
+	if (error.length) {
+		[parts addObject:[NSString stringWithFormat:@"error=%@", error]];
+	}
+	NSString *exception = record[@"exception"];
+	if (exception.length) {
+		[parts addObject:[NSString stringWithFormat:@"exception=%@",
+			exception]];
+	}
+	return [parts componentsJoinedByString:@" "];
+}
+
+static NSString *AAPDiagGetterSummary(NSDictionary *record) {
+	if (![record isKindOfClass:[NSDictionary class]] || !record.count) {
+		return @"unavailable";
+	}
+	NSString *description = record[@"description"];
+	if (description.length) {
+		return description;
+	}
+	if ([record[@"available"] boolValue]) {
+		return [NSString stringWithFormat:@"%@",
+			record[@"value"] ?: @"unknown"];
+	}
+	NSString *error = record[@"error"];
+	return error.length ? error : @"unavailable";
+}
+
 static NSArray<NSString *> *AAPDiagTransportSources(void) {
 	return @[@"bluetoothd", @"heard", @"aacpdiagd"];
 }
@@ -361,8 +402,7 @@ static NSDictionary *AAPDiagRunCombinedTest(
 	NSString *nativeStatus = nativeResult[@"status"];
 	BOOL nativeInvoked =
 		[nativeStatus isEqualToString:
-			@"native_setters_invoked_unconfirmed"] ||
-		[nativeStatus isEqualToString:@"local_getter_only"];
+			@"native_setter_invoked_unconfirmed"];
 	BOOL deviceMissing =
 		[nativeStatus isEqualToString:@"native_device_missing"] ||
 		[nativeStatus isEqualToString:@"device_missing"];
@@ -413,9 +453,6 @@ static NSString *AAPDiagConfirmationTitle(NSDictionary *result) {
 		@"native_setter_invoked_unconfirmed"]) {
 		return @"Native Setter Invoked / Unconfirmed";
 	}
-	if ([status isEqualToString:@"local_getter_only"]) {
-		return @"Local Getter Only";
-	}
 	if ([status isEqualToString:@"device_missing"]) {
 		return @"Device Missing";
 	}
@@ -443,12 +480,45 @@ static void AAPDiagShowResult(BTSDeviceConfigController *controller,
 	NSDictionary *native = [result[@"native"] isKindOfClass:[NSDictionary class]]
 		? result[@"native"]
 		: @{};
-	NSDictionary *before = [native[@"before"] isKindOfClass:[NSDictionary class]]
-		? native[@"before"]
+	NSArray *devices = [native[@"devices"] isKindOfClass:[NSArray class]]
+		? native[@"devices"]
+		: @[];
+	NSDictionary *device = devices.count
+		? AAPDiagDictionaryValue(devices.firstObject)
 		: @{};
-	NSDictionary *after = [native[@"after"] isKindOfClass:[NSDictionary class]]
-		? native[@"after"]
-		: @{};
+	NSDictionary *before = device[@"getter_before"]
+		? AAPDiagDictionaryValue(device[@"getter_before"])
+		: AAPDiagDictionaryValue(native[@"before"]);
+	NSDictionary *after = device[@"getter_after"]
+		? AAPDiagDictionaryValue(device[@"getter_after"])
+		: AAPDiagDictionaryValue(native[@"after"]);
+	NSDictionary *modeSetter = AAPDiagDictionaryValue(device[@"set_mode"]);
+	if (!modeSetter.count) {
+		modeSetter = AAPDiagDictionaryValue(native[@"set_mode"]);
+	}
+	NSDictionary *modeUpdate =
+		AAPDiagDictionaryValue(device[@"send_update_after_mode"]);
+	if (!modeUpdate.count) {
+		modeUpdate = AAPDiagDictionaryValue(
+			native[@"send_update_after_mode"]);
+	}
+	NSDictionary *configSetter =
+		AAPDiagDictionaryValue(device[@"config_setter"]);
+	if (!configSetter.count) {
+		configSetter = AAPDiagDictionaryValue(native[@"config_setter"]);
+	}
+	NSDictionary *adaptiveSetter = AAPDiagDictionaryValue(
+		device[@"set_adaptive_transparency"]);
+	if (!adaptiveSetter.count) {
+		adaptiveSetter = AAPDiagDictionaryValue(
+			native[@"set_adaptive_transparency"]);
+	}
+	NSDictionary *adaptiveUpdate = AAPDiagDictionaryValue(
+		device[@"send_update_after_adaptive"]);
+	if (!adaptiveUpdate.count) {
+		adaptiveUpdate = AAPDiagDictionaryValue(
+			native[@"send_update_after_adaptive"]);
+	}
 	NSDictionary *transportReady =
 		[result[@"transport_ready"] isKindOfClass:[NSDictionary class]]
 			? result[@"transport_ready"]
@@ -458,13 +528,19 @@ static void AAPDiagShowResult(BTSDeviceConfigController *controller,
 			? result[@"transport_results"]
 			: @{};
 	NSArray<NSString *> *resultSources = transportResults.allKeys ?: @[];
-	NSString *message = [NSString stringWithFormat:
-		@"Native: %@\nLocal getter (informational only): %@ -> %@\n"
+	NSMutableString *message = [[NSString stringWithFormat:
+		@"Native: %@\nSetter: %@ %@\nConfig setter: %@\n"
+		@"Update after mode: %@\n"
+		@"Getter (informational only): %@ -> %@\n"
 		@"Transport: %@\nSource: %@\nReady: %@\n"
 		@"Result sources: %@\n\nLog: %@",
 		native[@"status"] ?: @"none",
-		before[@"description"] ?: @"unavailable",
-		after[@"description"] ?: @"unavailable",
+		modeSetter[@"selector"] ?: @"none",
+		AAPDiagInvocationSummary(modeSetter),
+		AAPDiagInvocationSummary(configSetter),
+		AAPDiagInvocationSummary(modeUpdate),
+		AAPDiagGetterSummary(before),
+		AAPDiagGetterSummary(after),
 		AAPDiagStatusSummary(result[@"transport"]),
 		result[@"transport_source"] ?: @"none",
 		AAPDiagTransportReadinessSummary(
@@ -472,9 +548,18 @@ static void AAPDiagShowResult(BTSDeviceConfigController *controller,
 		resultSources.count
 			? [resultSources componentsJoinedByString:@", "]
 			: @"none",
-		AAPDiagLogPath];
+		AAPDiagLogPath] mutableCopy];
+	if (mode == AAPDiagModeAdaptive) {
+		NSString *updated = [message stringByReplacingOccurrencesOfString:
+			@"\nTransport:" withString:[NSString stringWithFormat:
+				@"\nAdaptive setter: %@\n"
+				@"Update after adaptive: %@\nTransport:",
+				AAPDiagInvocationSummary(adaptiveSetter),
+				AAPDiagInvocationSummary(adaptiveUpdate)]];
+		[message setString:updated];
+	}
 	if (!ack && [result[@"status"] isEqualToString:@"device_missing"]) {
-		message = [message stringByAppendingString:
+		[message appendString:
 			@"\n\nIf Device Missing: manually switch ANC/Transparency "
 			@"once in Settings, return here, then retry."];
 	}
@@ -557,17 +642,6 @@ static void AAPDiagShowResult(BTSDeviceConfigController *controller,
 }
 
 %new
-- (void)pgsDiagRunAll:(UIAlertController *)alert {
-	[alert dismissViewControllerAnimated:YES completion:^{
-		dispatch_after(dispatch_time(DISPATCH_TIME_NOW,
-			(3 + 2) * NSEC_PER_SEC),
-			dispatch_get_main_queue(), ^{
-				[self pgsDiagRunMode:@(AAPDiagModeNoiseCancellation)];
-			});
-	}];
-}
-
-%new
 - (void)pgsDiagShowMenu:(UIBarButtonItem *)sender {
 	BluetoothDevice *device = AAPDiagBluetoothDevice(self);
 	NSString *address = AAPDiagNormalizeAddress(device.address);
@@ -581,15 +655,23 @@ static void AAPDiagShowResult(BTSDeviceConfigController *controller,
 			address,
 			device.productId]
 		preferredStyle:UIAlertControllerStyleActionSheet];
-	for (NSNumber *mode in @[
-		@(AAPDiagModeNoiseCancellation),
-		@(AAPDiagModeTransparency),
-		@(AAPDiagModeAdaptive),
-	]) {
-		NSString *label = [NSString stringWithFormat:@"Test %@ (0x%02X)",
-			AAPDiagModeName(mode.unsignedIntValue),
-			mode.unsignedIntValue];
-		[sheet addAction:[UIAlertAction actionWithTitle:label
+	NSArray<NSDictionary *> *items = @[
+		@{
+			@"title": @"Enable Adaptive Transparency",
+			@"mode": @(AAPDiagModeAdaptive),
+		},
+		@{
+			@"title": @"Test ANC",
+			@"mode": @(AAPDiagModeNoiseCancellation),
+		},
+		@{
+			@"title": @"Test Transparency",
+			@"mode": @(AAPDiagModeTransparency),
+		},
+	];
+	for (NSDictionary *item in items) {
+		NSNumber *mode = item[@"mode"];
+		[sheet addAction:[UIAlertAction actionWithTitle:item[@"title"]
 			style:UIAlertActionStyleDefault
 			handler:^(__unused UIAlertAction *action) {
 				[self pgsDiagRunMode:mode];
