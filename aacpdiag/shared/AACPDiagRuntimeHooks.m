@@ -1116,6 +1116,7 @@ static void AAPDiagInstallClassHooksForName(const char *className,
 	AAPDiagHookClassMethods(cls, YES);
 }
 
+#if !AACPDIAG_TRANSPORT_SAFE_MODE
 static void AAPDiagInstallClassHooksOnce(void) {
 	for (size_t index = 0;
 		index < sizeof(AAPDiagWatchedClasses) / sizeof(AAPDiagWatchedClasses[0]);
@@ -1141,6 +1142,7 @@ static void AAPDiagLoadBluetoothFrameworks(void) {
 		}
 	}
 }
+#endif
 
 static void AAPDiagHookFunction(const char *name,
 	void *replacement,

@@ -9,8 +9,8 @@ import tarfile
 ROOT = pathlib.Path(__file__).resolve().parent
 SOURCE = ROOT / "aacpdiag"
 ARCHIVE = ROOT / "aacpdiag-source.tar.gz"
-PACKAGE_VERSION = "0.5.8~adts3diag10"
-DIAGNOSTIC_MARKER = "diag10_active_aacp_fd_reuse"
+PACKAGE_VERSION = "0.6.0~adts3final"
+DIAGNOSTIC_MARKER = "adts3final_socket_hooks_only"
 
 
 def is_source_file(path: pathlib.Path) -> bool:
@@ -55,6 +55,7 @@ def main() -> int:
         "aacpdiag/ui/PodsGrantAACPDiag.plist",
         "aacpdiag/ui/Tweak.x",
         "aacpdiag/tools/verify_package.py",
+        "aacpdiag/README.md",
     }
     with tarfile.open(ARCHIVE, "r:gz") as archive:
         names = set(archive.getnames())
@@ -188,7 +189,8 @@ def main() -> int:
             b"informational_only",
         ),
         "aacpdiag/shared/AACPDiagRuntimeHooks.m": (
-            b"diag10_active_aacp_fd_reuse",
+            b"adts3final_socket_hooks_only",
+            b"#if !AACPDIAG_TRANSPORT_SAFE_MODE",
             b"AAP_DIAG_ACTIVE_FD_WINDOW_US",
             b"AAPDiagCopyActiveAACPDescriptorWithMatch",
             b"AAPDiagCopyAACPRXFramesForDescriptor",
@@ -203,14 +205,8 @@ def main() -> int:
             b"AACPDIAG_TRANSPORT_NO_ACTIVE_FD",
         ),
         "aacpdiag/ui/Tweak.x": (
-            b"Adaptive Transparency Mode",
-            b"active_aacp_fd_tx_unconfirmed",
-            b"active_aacp_fd_tx_failed",
-            b"getter_before",
-            b"getter_after",
-            b"send_update_after_mode",
-            b"send_update_after_adaptive",
-            b"set_adaptive_transparency",
+            b"Apply Adaptive Transparency",
+            b"native_skipped_safe_mode",
         ),
     }
     for source_name, markers in source_markers.items():
@@ -236,7 +232,7 @@ def main() -> int:
         )
 
     ui_source = packed_sources["aacpdiag/ui/Tweak.x"]
-    if ui_source.count(b"Adaptive Transparency Mode") != 1:
+    if ui_source.count(b"Apply Adaptive Transparency") != 1:
         raise SystemExit(
             "UI must expose exactly one Adaptive Transparency Mode action"
         )
@@ -245,6 +241,7 @@ def main() -> int:
         b"Test Transparency",
         b"Enable Adaptive Transparency",
         b"No Confirmation",
+        b"Adaptive Transparency Mode",
     ):
         if legacy_text in ui_source:
             raise SystemExit(
