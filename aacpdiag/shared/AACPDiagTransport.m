@@ -6,6 +6,7 @@
 #import <stdint.h>
 #import <string.h>
 #import <sys/socket.h>
+#import <time.h>
 #import <unistd.h>
 
 #define AAP_AF_BLUETOOTH 32
@@ -35,6 +36,13 @@ struct AAPDiagL2CapAddressAlt {
 static const uint8_t AAPDiagAACPHeader[] = {0x04, 0x00, 0x04, 0x00};
 static const uint8_t AAPDiagListeningConfigID = 0x1A;
 static const uint8_t AAPDiagListeningModeID = 0x0D;
+
+static uint64_t AAPDiagTransportMonotonicMicroseconds(void) {
+	struct timespec value = {0};
+	clock_gettime(CLOCK_MONOTONIC, &value);
+	return (uint64_t)value.tv_sec * 1000000ULL +
+		(uint64_t)value.tv_nsec / 1000ULL;
+}
 
 static BOOL AAPDiagParseAddress(NSString *address,
 	uint8_t reversed[6],
@@ -296,7 +304,7 @@ static NSDictionary<NSString *, id> *AAPDiagRunActiveDescriptorTransport(
 		};
 	}
 	BOOL fallbackUnique = !exactMatch;
-	uint64_t started = AAPDiagMonotonicMicroseconds();
+	uint64_t started = AAPDiagTransportMonotonicMicroseconds();
 	[trace addObject:[NSString stringWithFormat:
 		@"active_fd_selected fd=%d exact=%d fallback_unique=%d",
 		fd,
@@ -327,7 +335,7 @@ static NSDictionary<NSString *, id> *AAPDiagRunActiveDescriptorTransport(
 	}
 
 	[NSThread sleepForTimeInterval:0.20];
-	uint64_t modeSentAt = AAPDiagMonotonicMicroseconds();
+	uint64_t modeSentAt = AAPDiagTransportMonotonicMicroseconds();
 	NSData *modeFrame = AAPDiagFrame(AAPDiagListeningModeID, (uint8_t)mode);
 	ssize_t modeSent = send(fd, modeFrame.bytes, modeFrame.length, 0);
 	BOOL modeOK = modeSent == (ssize_t)modeFrame.length;
