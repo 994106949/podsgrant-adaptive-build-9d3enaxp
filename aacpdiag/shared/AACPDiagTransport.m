@@ -181,7 +181,7 @@ static int AAPDiagConnect(NSString *address,
 						&variantName);
 					NSString *attempt = [NSString
 						stringWithFormat:
-							@"%s/%s/%s/len=%lu/%s errno=%d(%s)",
+							@"%s/%s/%s/len=%lu/%@ errno=%d(%s)",
 						addressNames[addressIndex],
 						layoutNames[layoutIndex],
 						endianNames[endianIndex],

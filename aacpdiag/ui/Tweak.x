@@ -16,6 +16,8 @@
 @end
 
 @interface BTSDeviceConfigController : UIViewController
+- (void)pgsDiagRunMode:(NSNumber *)modeNumber;
+- (void)pgsDiagShowMenu:(UIBarButtonItem *)sender;
 @end
 
 static const void *AAPDiagButtonKey = &AAPDiagButtonKey;
@@ -89,6 +91,16 @@ static BOOL AAPDiagResultHasProtocolACK(NSDictionary *result) {
 	return [result[@"status"] isEqualToString:@"protocol_ack"];
 }
 
+static BOOL AAPDiagNativeConfirmed(NSDictionary *result) {
+	if (![result isKindOfClass:[NSDictionary class]]) {
+		return NO;
+	}
+	NSDictionary *after = result[@"after"];
+	return [result[@"status"] isEqualToString:@"native_confirmed"] &&
+		[after isKindOfClass:[NSDictionary class]] &&
+		[after[@"matches"] boolValue];
+}
+
 static NSDictionary *AAPDiagWaitForHelperResult(
 	unsigned long long sequence,
 	NSTimeInterval timeout) {
@@ -107,13 +119,6 @@ static NSDictionary *AAPDiagRunCombinedTest(
 	BluetoothDevice *device,
 	unsigned int mode) {
 	NSString *address = AAPDiagNormalizeAddress(device.address);
-	if (!address.length) {
-		return @{
-			@"status": @"no_device_address",
-			@"mode": @(mode),
-			@"trace": @[@"BluetoothDevice.address is empty"],
-		};
-	}
 
 	BOOL initialGetterAvailable = NO;
 	unsigned int initialGetter =
@@ -124,10 +129,12 @@ static NSDictionary *AAPDiagRunCombinedTest(
 		mode,
 		address);
 
-	NSDictionary *localResult = AAPDiagRunTransportTest(address, mode);
-	AAPDiagLog(@"ui_local_result mode=%u summary=%@",
+	NSDictionary *nativeResult = AAPDiagRunNativeTest(device, mode);
+	AAPDiagLog(@"ui_native_result mode=%u status=%@ before=%@ after=%@",
 		mode,
-		AAPDiagStatusSummary(localResult));
+		nativeResult[@"status"] ?: @"unknown",
+		nativeResult[@"before"] ?: @{},
+		nativeResult[@"after"] ?: @{});
 
 	unsigned long long sequence =
 		(unsigned long long)([[NSDate date] timeIntervalSince1970] * 1000.0) +
@@ -135,12 +142,21 @@ static NSDictionary *AAPDiagRunCombinedTest(
 	NSMutableDictionary *combined = [@{
 		@"status": @"pending",
 		@"mode": @(mode),
-		@"address": address,
+		@"address": address ?: @"",
 		@"sequence": @(sequence),
-		@"local": localResult,
+		@"native": nativeResult,
 	} mutableCopy];
 
-	if (!AAPDiagResultHasProtocolACK(localResult)) {
+	NSDictionary *localResult = nil;
+	if (address.length) {
+		localResult = AAPDiagRunTransportTest(address, mode);
+		combined[@"local"] = localResult;
+		AAPDiagLog(@"ui_local_result mode=%u summary=%@",
+			mode,
+			AAPDiagStatusSummary(localResult));
+	}
+
+	if (address.length && !AAPDiagResultHasProtocolACK(localResult)) {
 		BOOL posted = AAPDiagWriteHelperRequest(address, mode, sequence);
 		AAPDiagLog(@"helper_request posted=%d sequence=%llu",
 			posted,
@@ -168,9 +184,9 @@ static NSDictionary *AAPDiagRunCombinedTest(
 	BOOL localACK = AAPDiagResultHasProtocolACK(localResult);
 	NSDictionary *helperResult = combined[@"helper"];
 	BOOL helperACK = AAPDiagResultHasProtocolACK(helperResult);
-	combined[@"status"] = (localACK || helperACK)
-		? @"protocol_ack"
-		: @"no_earbud_ack";
+	combined[@"status"] = AAPDiagNativeConfirmed(nativeResult)
+		? @"native_confirmed"
+		: ((localACK || helperACK) ? @"protocol_ack" : @"no_confirmation");
 
 	BOOL finalGetterAvailable = NO;
 	unsigned int finalGetter =
@@ -186,9 +202,10 @@ static NSDictionary *AAPDiagRunCombinedTest(
 	AAPDiagLog(@"local_getter after available=%d value=%u (not used as success)",
 		finalGetterAvailable,
 		finalGetter);
-	AAPDiagLog(@"ui_combined_result mode=%u status=%@ local=%@ helper=%@",
+	AAPDiagLog(@"ui_combined_result mode=%u status=%@ native=%@ local=%@ helper=%@",
 		mode,
 		combined[@"status"],
+		nativeResult[@"status"] ?: @"unknown",
 		AAPDiagStatusSummary(localResult),
 		AAPDiagStatusSummary(helperResult));
 	return combined;
@@ -205,14 +222,26 @@ static void AAPDiagShowResult(BTSDeviceConfigController *controller,
 	button.enabled = YES;
 	button.title = @"AACP";
 
+	BOOL nativeConfirmed = AAPDiagNativeConfirmed(result[@"native"]);
 	BOOL ack = AAPDiagResultHasProtocolACK(result);
 	NSString *title = [NSString stringWithFormat:@"AACP %@: %@",
 		AAPDiagModeName(mode),
-		ack ? @"ACK" : @"No ACK"];
+		nativeConfirmed ? @"Confirmed" : (ack ? @"Protocol ACK" : @"No Confirmation")];
+	NSDictionary *native = [result[@"native"] isKindOfClass:[NSDictionary class]]
+		? result[@"native"]
+		: @{};
+	NSDictionary *before = [native[@"before"] isKindOfClass:[NSDictionary class]]
+		? native[@"before"]
+		: @{};
+	NSDictionary *after = [native[@"after"] isKindOfClass:[NSDictionary class]]
+		? native[@"after"]
+		: @{};
 	NSString *message = [NSString stringWithFormat:
-		@"Local: %@\nHelper: %@\n\n"
-		@"ACK only proves the earbud answered setting 0x0D. "
-		@"Confirm the audible result separately. Log: %@",
+		@"Native: %@\nNative before: %@\nNative after: %@\n"
+		@"Local: %@\nHelper: %@\n\nLog: %@",
+		native[@"status"] ?: @"none",
+		before[@"description"] ?: @"unavailable",
+		after[@"description"] ?: @"unavailable",
 		AAPDiagStatusSummary(result[@"local"]),
 		AAPDiagStatusSummary(result[@"helper"]),
 		AAPDiagLogPath];
@@ -313,7 +342,7 @@ static void AAPDiagShowResult(BTSDeviceConfigController *controller,
 	UIAlertController *sheet = [UIAlertController
 		alertControllerWithTitle:@"AACP Diagnostic"
 		message:[NSString stringWithFormat:
-			@"%@\nproductId=%u\n\nUse ANC first, then Transparency, then Adaptive.",
+			@"%@\nproductId=%u\n\nEach test writes 0x0F, sets the mode, then reads it back.",
 			address,
 			device.productId]
 		preferredStyle:UIAlertControllerStyleActionSheet];

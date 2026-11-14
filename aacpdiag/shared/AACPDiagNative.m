@@ -1,0 +1,454 @@
+#import "AACPDiag.h"
+
+#import <objc/runtime.h>
+#import <stdlib.h>
+
+static NSArray<NSString *> *AAPDiagSelectorCandidates(void) {
+	return @[
+		@"listeningMode",
+		@"setListeningMode:",
+		@"setListeningMode:error:",
+		@"listeningModeConfigs",
+		@"setListeningModeConfigs:",
+		@"supportedListeningModes",
+		@"supportsListeningMode:",
+		@"noiseControlMode",
+		@"setNoiseControlMode:",
+		@"adaptiveTransparencyEnabled",
+		@"setAdaptiveTransparencyEnabled:",
+		@"adaptiveTransparencySupported",
+		@"supportsAdaptiveTransparency",
+		@"transparencyCustomizedForAddress:",
+		@"setTransparencyCustomized:forAddress:",
+		@"hearingAidEnabled",
+		@"setHearingAidEnabled:",
+		@"hearingProtectionEnabled",
+		@"setHearingProtectionEnabled:",
+	];
+}
+
+static BOOL AAPDiagSelectorMentionsListening(NSString *selectorName) {
+	NSString *lower = selectorName.lowercaseString;
+	return [lower containsString:@"listen"] ||
+		[lower containsString:@"noise"] ||
+		[lower containsString:@"transparen"] ||
+		[lower containsString:@"adaptive"] ||
+		[lower containsString:@"anc"] ||
+		[lower containsString:@"hearing"];
+}
+
+static NSArray<NSString *> *AAPDiagMatchingMethods(Class cls) {
+	NSMutableArray<NSString *> *result = [NSMutableArray array];
+	if (!cls) {
+		return result;
+	}
+
+	unsigned int count = 0;
+	Method *methods = class_copyMethodList(cls, &count);
+	for (unsigned int index = 0; index < count; index++) {
+		NSString *name = NSStringFromSelector(method_getName(methods[index]));
+		if (!AAPDiagSelectorMentionsListening(name)) {
+			continue;
+		}
+		const char *types = method_getTypeEncoding(methods[index]);
+		[result addObject:[NSString stringWithFormat:@"-%@ %s",
+			name,
+			types ?: ""]];
+	}
+	free(methods);
+	return result;
+}
+
+static NSDictionary<NSString *, id> *AAPDiagClassInventory(id object) {
+	if (!object) {
+		return @{@"class": @"nil"};
+	}
+	NSMutableDictionary<NSString *, id> *inventory =
+		[NSMutableDictionary dictionary];
+	Class cls = object_getClass(object);
+	NSMutableArray<NSString *> *hierarchy = [NSMutableArray array];
+	NSMutableDictionary<NSString *, NSArray<NSString *> *> *methods =
+		[NSMutableDictionary dictionary];
+	for (NSUInteger depth = 0; cls && depth < 8; depth++) {
+		NSString *className = NSStringFromClass(cls);
+		[hierarchy addObject:className ?: @"?"];
+		NSArray<NSString *> *matching = AAPDiagMatchingMethods(cls);
+		if (matching.count) {
+			methods[className ?: @"?"] = matching;
+		}
+		cls = class_getSuperclass(cls);
+	}
+	inventory[@"class"] = NSStringFromClass(object_getClass(object)) ?: @"?";
+	inventory[@"hierarchy"] = hierarchy;
+	inventory[@"methods"] = methods;
+	return inventory;
+}
+
+static NSArray<NSString *> *AAPDiagSelectorAvailability(id object) {
+	NSMutableArray<NSString *> *result = [NSMutableArray array];
+	if (!object) {
+		return result;
+	}
+	for (NSString *name in AAPDiagSelectorCandidates()) {
+		SEL selector = NSSelectorFromString(name);
+		if (!selector) {
+			continue;
+		}
+		BOOL responds = [object respondsToSelector:selector];
+		NSString *marker = responds ? @"YES" : @"NO";
+		[result addObject:[NSString stringWithFormat:@"%@=%@", name, marker]];
+	}
+	return result;
+}
+
+static BOOL AAPDiagReadGetter(id target,
+	SEL selector,
+	long long *value,
+	NSString **description,
+	NSString **error) {
+	if (description) {
+		*description = @"";
+	}
+	if (!target || ![target respondsToSelector:selector]) {
+		if (error) {
+			*error = @"selector is unavailable";
+		}
+		return NO;
+	}
+	NSMethodSignature *signature = [target methodSignatureForSelector:selector];
+	if (!signature || signature.methodReturnLength == 0) {
+		if (error) {
+			*error = @"method has no return value";
+		}
+		return NO;
+	}
+
+	NSInvocation *invocation =
+		[NSInvocation invocationWithMethodSignature:signature];
+	invocation.target = target;
+	invocation.selector = selector;
+	@try {
+		[invocation invoke];
+	} @catch (NSException *exception) {
+		if (error) {
+			*error = exception.reason ?: @"invocation raised an exception";
+		}
+		return NO;
+	}
+
+	const char *returnType = signature.methodReturnType;
+	if (returnType && returnType[0] == '@') {
+		__unsafe_unretained id objectValue = nil;
+		[invocation getReturnValue:&objectValue];
+		if (description) {
+			*description = objectValue ? [objectValue description] : @"nil";
+		}
+		if ([objectValue respondsToSelector:@selector(longLongValue)]) {
+			if (value) {
+				*value = [(NSNumber *)objectValue longLongValue];
+			}
+			return YES;
+		}
+		if (error) {
+			*error = @"object return did not expose longLongValue";
+		}
+		return NO;
+	}
+
+	uint64_t raw = 0;
+	NSUInteger length = signature.methodReturnLength;
+	if (length > sizeof(raw)) {
+		length = sizeof(raw);
+	}
+	[invocation getReturnValue:&raw];
+	if (value) {
+		switch (returnType ? returnType[0] : 'I') {
+			case 'c':
+				*value = (int8_t)raw;
+				break;
+			case 'C':
+			case 'B':
+				*value = (uint8_t)raw;
+				break;
+			case 's':
+				*value = (int16_t)raw;
+				break;
+			case 'S':
+				*value = (uint16_t)raw;
+				break;
+			case 'i':
+				*value = (int32_t)raw;
+				break;
+			case 'I':
+				*value = (uint32_t)raw;
+				break;
+			default:
+				*value = (long long)raw;
+				break;
+		}
+	}
+	if (description) {
+		*description = [NSString stringWithFormat:@"%lld", value ? *value : 0];
+	}
+	return YES;
+}
+
+static BOOL AAPDiagInvokeSetter(id target,
+	SEL selector,
+	unsigned int argument,
+	NSString **returnDescription,
+	NSString **error) {
+	if (returnDescription) {
+		*returnDescription = @"";
+	}
+	if (!target || ![target respondsToSelector:selector]) {
+		if (error) {
+			*error = @"selector is unavailable";
+		}
+		return NO;
+	}
+	NSMethodSignature *signature = [target methodSignatureForSelector:selector];
+	if (!signature || signature.numberOfArguments < 3) {
+		if (error) {
+			*error = @"unsupported method signature";
+		}
+		return NO;
+	}
+	const char *argumentType = [signature getArgumentTypeAtIndex:2];
+	if (!argumentType) {
+		if (error) {
+			*error = @"missing argument type";
+		}
+		return NO;
+	}
+
+	NSInvocation *invocation =
+		[NSInvocation invocationWithMethodSignature:signature];
+	invocation.target = target;
+	invocation.selector = selector;
+	switch (argumentType[0]) {
+		case 'c': {
+			int8_t value = (int8_t)argument;
+			[invocation setArgument:&value atIndex:2];
+			break;
+		}
+		case 'C':
+		case 'B': {
+			uint8_t value = (uint8_t)argument;
+			[invocation setArgument:&value atIndex:2];
+			break;
+		}
+		case 's': {
+			int16_t value = (int16_t)argument;
+			[invocation setArgument:&value atIndex:2];
+			break;
+		}
+		case 'S': {
+			uint16_t value = (uint16_t)argument;
+			[invocation setArgument:&value atIndex:2];
+			break;
+		}
+		case 'i': {
+			int32_t value = (int32_t)argument;
+			[invocation setArgument:&value atIndex:2];
+			break;
+		}
+		case 'I': {
+			uint32_t value = (uint32_t)argument;
+			[invocation setArgument:&value atIndex:2];
+			break;
+		}
+		case 'q':
+		case 'l': {
+			int64_t value = (int64_t)argument;
+			[invocation setArgument:&value atIndex:2];
+			break;
+		}
+		case 'Q':
+		case 'L': {
+			uint64_t value = (uint64_t)argument;
+			[invocation setArgument:&value atIndex:2];
+			break;
+		}
+		default:
+			if (error) {
+				*error = [NSString stringWithFormat:
+					@"unsupported argument type %s", argumentType];
+			}
+			return NO;
+	}
+
+	@try {
+		[invocation invoke];
+	} @catch (NSException *exception) {
+		if (error) {
+			*error = exception.reason ?: @"invocation raised an exception";
+		}
+		return NO;
+	}
+
+	const char *returnType = signature.methodReturnType;
+	if (returnDescription && signature.methodReturnLength > 0 &&
+		returnType && returnType[0] != 'v') {
+		uint64_t raw = 0;
+		NSUInteger length = signature.methodReturnLength;
+		if (length > sizeof(raw)) {
+			length = sizeof(raw);
+		}
+		[invocation getReturnValue:&raw];
+		*returnDescription = [NSString stringWithFormat:@"0x%llx",
+			(unsigned long long)raw];
+	}
+	return YES;
+}
+
+NSDictionary<NSString *, id> *AAPDiagRunNativeTest(id device,
+	unsigned int mode) {
+	NSMutableArray<NSString *> *trace = [NSMutableArray array];
+	NSMutableDictionary<NSString *, id> *result =
+		[NSMutableDictionary dictionary];
+	result[@"status"] = @"native_unconfirmed";
+	result[@"mode"] = @(mode);
+	result[@"trace"] = trace;
+	result[@"timestamp"] = @([[NSDate date] timeIntervalSince1970]);
+
+	if (!device) {
+		result[@"status"] = @"native_device_missing";
+		[trace addObject:@"BluetoothDevice is nil"];
+		return result;
+	}
+
+	result[@"inventory"] = AAPDiagClassInventory(device);
+	result[@"selectors"] = AAPDiagSelectorAvailability(device);
+	[trace addObject:[NSString stringWithFormat:
+		@"native_device class=%@",
+		NSStringFromClass(object_getClass(device)) ?: @"?"]];
+
+	long long before = 0;
+	NSString *beforeDescription = @"";
+	NSString *getterError = nil;
+	BOOL beforeOK = AAPDiagReadGetter(device,
+		NSSelectorFromString(@"listeningMode"),
+		&before,
+		&beforeDescription,
+		&getterError);
+	result[@"before"] = @{
+		@"available": @(beforeOK),
+		@"value": @(before),
+		@"description": beforeDescription ?: @"",
+		@"error": getterError ?: @"",
+	};
+	[trace addObject:[NSString stringWithFormat:
+		@"listeningMode before available=%d value=%lld desc=%@ error=%@",
+		beforeOK,
+		before,
+		beforeDescription ?: @"",
+		getterError ?: @"none"]];
+
+	long long supported = 0;
+	NSString *supportedDescription = @"";
+	NSString *supportedError = nil;
+	BOOL supportedOK = AAPDiagReadGetter(device,
+		NSSelectorFromString(@"supportedListeningModes"),
+		&supported,
+		&supportedDescription,
+		&supportedError);
+	result[@"supported_modes"] = @{
+		@"available": @(supportedOK),
+		@"value": @(supported),
+		@"description": supportedDescription ?: @"",
+		@"error": supportedError ?: @"",
+	};
+	[trace addObject:[NSString stringWithFormat:
+		@"supportedListeningModes available=%d value=%lld desc=%@ error=%@",
+		supportedOK,
+		supported,
+		supportedDescription ?: @"",
+		supportedError ?: @"none"]];
+
+	NSString *configReturn = @"";
+	NSString *configError = nil;
+	BOOL configOK = AAPDiagInvokeSetter(device,
+		NSSelectorFromString(@"setListeningModeConfigs:"),
+		0x0F,
+		&configReturn,
+		&configError);
+	result[@"config"] = @{
+		@"invoked": @(configOK),
+		@"return": configReturn ?: @"",
+		@"error": configError ?: @"",
+	};
+	[trace addObject:[NSString stringWithFormat:
+		@"setListeningModeConfigs:0x0F invoked=%d return=%@ error=%@",
+		configOK,
+		configReturn ?: @"",
+		configError ?: @"none"]];
+
+	[NSThread sleepForTimeInterval:0.15];
+
+	NSString *modeReturn = @"";
+	NSString *modeError = nil;
+	BOOL modeOK = AAPDiagInvokeSetter(device,
+		NSSelectorFromString(@"setListeningMode:"),
+		mode,
+		&modeReturn,
+		&modeError);
+	result[@"set_mode"] = @{
+		@"invoked": @(modeOK),
+		@"return": modeReturn ?: @"",
+		@"error": modeError ?: @"",
+	};
+	[trace addObject:[NSString stringWithFormat:
+		@"setListeningMode:%u invoked=%d return=%@ error=%@",
+		mode,
+		modeOK,
+		modeReturn ?: @"",
+		modeError ?: @"none"]];
+
+	long long last = before;
+	NSString *lastDescription = beforeDescription ?: @"";
+	BOOL confirmed = NO;
+	for (NSUInteger attempt = 0; attempt < 15; attempt++) {
+		[NSThread sleepForTimeInterval:0.1];
+		long long value = 0;
+		NSString *valueDescription = @"";
+		NSString *readError = nil;
+		BOOL readOK = AAPDiagReadGetter(device,
+			NSSelectorFromString(@"listeningMode"),
+			&value,
+			&valueDescription,
+			&readError);
+		if (readOK) {
+			last = value;
+			lastDescription = valueDescription ?: @"";
+			[trace addObject:[NSString stringWithFormat:
+				@"readback attempt=%lu value=%lld desc=%@",
+				(unsigned long)(attempt + 1),
+				value,
+				valueDescription ?: @""]];
+			if (value == (long long)mode) {
+				confirmed = YES;
+				break;
+			}
+		} else if (readError) {
+			[trace addObject:[NSString stringWithFormat:
+				@"readback attempt=%lu error=%@",
+				(unsigned long)(attempt + 1),
+				readError]];
+		}
+	}
+	result[@"after"] = @{
+		@"value": @(last),
+		@"description": lastDescription ?: @"",
+		@"matches": @(confirmed),
+		@"requested": @(mode),
+	};
+	result[@"status"] = confirmed ? @"native_confirmed"
+		: (modeOK ? @"native_no_readback" : @"native_setter_missing");
+	[trace addObject:[NSString stringWithFormat:
+		@"native_result status=%@ requested=%u final=%lld",
+		result[@"status"],
+		mode,
+		last]];
+	return result;
+}

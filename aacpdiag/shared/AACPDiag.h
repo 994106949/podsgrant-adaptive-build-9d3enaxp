@@ -21,6 +21,9 @@ unsigned int AAPDiagReadLocalListeningMode(id _Nullable device, BOOL * _Nullable
 NSDictionary<NSString *, id> *AAPDiagRunTransportTest(NSString *address,
 	unsigned int mode);
 
+NSDictionary<NSString *, id> *AAPDiagRunNativeTest(id _Nullable device,
+	unsigned int mode);
+
 BOOL AAPDiagWriteHelperRequest(NSString *address,
 	unsigned int mode,
 	unsigned long long sequence);
