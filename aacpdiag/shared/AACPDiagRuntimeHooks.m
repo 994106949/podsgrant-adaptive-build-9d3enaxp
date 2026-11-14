@@ -99,6 +99,7 @@ static __thread int AAPDiagMethodHookDepth;
 static NSMutableSet<NSString *> *AAPDiagInventoriedClasses;
 static pthread_mutex_t AAPDiagInventoryLock = PTHREAD_MUTEX_INITIALIZER;
 
+#if !AACPDIAG_TRANSPORT_SAFE_MODE
 static const char *const AAPDiagWatchedClasses[] = {
 	"BluetoothDevice",
 	"BluetoothManager",
@@ -108,6 +109,7 @@ static const char *const AAPDiagWatchedClasses[] = {
 	"BTSDevice",
 	"AudioAccessoryManager",
 };
+#endif
 
 static const char *const AAPDiagCoreSelectors[] = {
 	"address",
@@ -1078,6 +1080,7 @@ static void AAPDiagHookClassMethods(Class cls, BOOL classMethods) {
 	free(methods);
 }
 
+#if !AACPDIAG_TRANSPORT_SAFE_MODE
 static void AAPDiagInstallClassHooksForName(const char *className,
 	size_t inventoryIndex) {
 	(void)inventoryIndex;
@@ -1116,7 +1119,6 @@ static void AAPDiagInstallClassHooksForName(const char *className,
 	AAPDiagHookClassMethods(cls, YES);
 }
 
-#if !AACPDIAG_TRANSPORT_SAFE_MODE
 static void AAPDiagInstallClassHooksOnce(void) {
 	for (size_t index = 0;
 		index < sizeof(AAPDiagWatchedClasses) / sizeof(AAPDiagWatchedClasses[0]);
