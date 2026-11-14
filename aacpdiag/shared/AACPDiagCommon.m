@@ -1,7 +1,9 @@
 #import "AACPDiag.h"
 
+#import <CoreFoundation/CoreFoundation.h>
 #import <errno.h>
 #import <fcntl.h>
+#import <math.h>
 #import <notify.h>
 #import <os/log.h>
 #import <stdarg.h>
@@ -37,7 +39,7 @@ NSString *const AAPDiagDarwinNotification =
 	@"com.lns.pogr.aacpdiag.request";
 const char *const AAPDiagNotifyName =
 	"com.lns.pogr.aacpdiag.request.notify";
-NSString *const AAPDiagVersion = @"0.5.7~adts3diag7";
+NSString *const AAPDiagVersion = @"0.5.8~adts3diag8";
 
 static void AAPDiagAppendLine(NSString *path, NSString *message) {
 	NSDateFormatter *formatter = [[NSDateFormatter alloc] init];
@@ -174,6 +176,17 @@ void AAPDiagRemoveRequestAndResultPaths(void) {
 		arrayByAddingObjectsFromArray:AAPDiagResultPaths()]) {
 		unlink(path.fileSystemRepresentation);
 	}
+	NSString *runtimeDirectory = @"/var/tmp/com.lns.pogr.aacpdiag";
+	NSArray<NSString *> *contents = [[NSFileManager defaultManager]
+		contentsOfDirectoryAtPath:runtimeDirectory
+		error:nil];
+	for (NSString *name in contents) {
+		if (![name hasPrefix:@"claim-"]) {
+			continue;
+		}
+		unlink([[runtimeDirectory stringByAppendingPathComponent:name]
+			fileSystemRepresentation]);
+	}
 }
 
 NSArray<NSString *> *AAPDiagRequestPaths(void) {
@@ -184,7 +197,7 @@ NSArray<NSString *> *AAPDiagRequestPaths(void) {
 	];
 }
 
-NSArray<NSString *> *AAPDiagResultPaths(void) {
+static NSArray<NSString *> *AAPDiagBaseResultPaths(void) {
 	return @[
 		AAPDiagFallbackResultPath,
 		AAPDiagResultPath,
@@ -192,12 +205,70 @@ NSArray<NSString *> *AAPDiagResultPaths(void) {
 	];
 }
 
-NSArray<NSString *> *AAPDiagReadyPaths(void) {
+static NSString *AAPDiagSourceComponent(NSString *source) {
+	NSString *component = [source
+		stringByReplacingOccurrencesOfString:@"/" withString:@"-"];
+	component = [component
+		stringByReplacingOccurrencesOfString:@":" withString:@"-"];
+	return component.length ? component : @"unknown";
+}
+
+static NSArray<NSString *> *AAPDiagResultPathsForSource(NSString *source) {
+	NSString *component = AAPDiagSourceComponent(source);
+	return @[
+		[NSString stringWithFormat:
+			@"/var/tmp/com.lns.pogr.aacpdiag/result-%@.plist",
+			component],
+		[NSString stringWithFormat:
+			@"/var/mobile/Library/Preferences/"
+			@"com.lns.pogr.aacpdiag.result-%@.plist",
+			component],
+		[NSString stringWithFormat:
+			@"/tmp/com.lns.pogr.aacpdiag/result-%@.plist",
+			component],
+	];
+}
+
+NSArray<NSString *> *AAPDiagResultPaths(void) {
+	NSMutableArray<NSString *> *paths =
+		[AAPDiagBaseResultPaths() mutableCopy];
+	for (NSString *source in @[@"bluetoothd", @"heard", @"aacpdiagd"]) {
+		[paths addObjectsFromArray:AAPDiagResultPathsForSource(source)];
+	}
+	return paths;
+}
+
+static NSArray<NSString *> *AAPDiagBaseReadyPaths(void) {
 	return @[
 		AAPDiagFallbackReadyPath,
 		AAPDiagReadyPath,
 		AAPDiagTmpReadyPath,
 	];
+}
+
+static NSArray<NSString *> *AAPDiagReadyPathsForSource(NSString *source) {
+	NSString *component = AAPDiagSourceComponent(source);
+	return @[
+		[NSString stringWithFormat:
+			@"/var/tmp/com.lns.pogr.aacpdiag/helper-%@.plist",
+			component],
+		[NSString stringWithFormat:
+			@"/var/mobile/Library/Preferences/"
+			@"com.lns.pogr.aacpdiag.helper-%@.plist",
+			component],
+		[NSString stringWithFormat:
+			@"/tmp/com.lns.pogr.aacpdiag/helper-%@.plist",
+			component],
+	];
+}
+
+NSArray<NSString *> *AAPDiagReadyPaths(void) {
+	NSMutableArray<NSString *> *paths =
+		[AAPDiagBaseReadyPaths() mutableCopy];
+	for (NSString *source in @[@"bluetoothd", @"heard", @"aacpdiagd"]) {
+		[paths addObjectsFromArray:AAPDiagReadyPathsForSource(source)];
+	}
+	return paths;
 }
 
 NSString *AAPDiagNormalizeAddress(NSString *address) {
@@ -398,11 +469,180 @@ BOOL AAPDiagWritePlistToPaths(NSDictionary<NSString *, id> *plist,
 	return written;
 }
 
+static NSDictionary<NSString *, id> *AAPDiagPlistAtPath(NSString *path) {
+	NSData *data = [NSData dataWithContentsOfFile:path];
+	if (!data.length) {
+		return nil;
+	}
+	id plist = [NSPropertyListSerialization
+		propertyListWithData:data
+		options:NSPropertyListImmutable
+		format:nil
+		error:nil];
+	return [plist isKindOfClass:[NSDictionary class]] ? plist : nil;
+}
+
+static double AAPDiagRequestCreationTime(NSDictionary *request,
+	NSString *path) {
+	double created = [request[@"created"] doubleValue];
+	if (created > 0) {
+		return created;
+	}
+	NSDictionary *attributes = [[NSFileManager defaultManager]
+		attributesOfItemAtPath:path
+		error:nil];
+	NSDate *modified = attributes[NSFileModificationDate];
+	created = modified.timeIntervalSince1970;
+	return created > 0 ? created : 0;
+}
+
+NSDictionary<NSString *, id> *AAPDiagReadLatestRequest(
+	NSString **selectedPath) {
+	if (selectedPath) {
+		*selectedPath = nil;
+	}
+	NSDictionary *latest = nil;
+	NSString *latestPath = nil;
+	double latestCreated = 0;
+	unsigned long long latestSequence = 0;
+	for (NSString *path in AAPDiagRequestPaths()) {
+		NSDictionary *request = AAPDiagPlistAtPath(path);
+		if (!request) {
+			continue;
+		}
+		double created = AAPDiagRequestCreationTime(request, path);
+		unsigned long long sequence =
+			[request[@"sequence"] unsignedLongLongValue];
+		BOOL newer = !latest || created > latestCreated + 0.000001;
+		BOOL sameTime = latest &&
+			fabs(created - latestCreated) <= 0.000001;
+		if (newer || (sameTime && sequence > latestSequence)) {
+			latest = request;
+			latestPath = path;
+			latestCreated = created;
+			latestSequence = sequence;
+		}
+	}
+	if (selectedPath) {
+		*selectedPath = latestPath;
+	}
+	return latest;
+}
+
+static NSString *AAPDiagClaimPath(unsigned long long sequence) {
+	return [NSString stringWithFormat:
+		@"/var/tmp/com.lns.pogr.aacpdiag/claim-%llu",
+		sequence];
+}
+
+BOOL AAPDiagRequestIsClaimed(unsigned long long sequence,
+	NSString **claimant) {
+	if (claimant) {
+		*claimant = nil;
+	}
+	if (sequence == 0) {
+		return NO;
+	}
+	NSString *path = AAPDiagClaimPath(sequence);
+	int fd = open(path.fileSystemRepresentation, O_RDONLY);
+	if (fd < 0) {
+		return NO;
+	}
+	char buffer[512] = {0};
+	ssize_t received = read(fd, buffer, sizeof(buffer) - 1);
+	close(fd);
+	if (received < 0) {
+		received = 0;
+	}
+	buffer[received] = '\0';
+	if (claimant) {
+		NSString *value = [NSString stringWithUTF8String:buffer];
+		*claimant = [value
+			stringByTrimmingCharactersInSet:
+				[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+	}
+	return YES;
+}
+
+BOOL AAPDiagClaimRequest(unsigned long long sequence, NSString *source) {
+	if (sequence == 0 || !source.length) {
+		return NO;
+	}
+	AAPDiagEnsureRuntimeDirectories();
+	NSString *path = AAPDiagClaimPath(sequence);
+	int fd = open(path.fileSystemRepresentation,
+		O_WRONLY | O_CREAT | O_EXCL,
+		0666);
+	if (fd < 0) {
+		return NO;
+	}
+	NSString *identity = [NSString stringWithFormat:
+		@"source=%@ pid=%d created=%.6f\n",
+		source,
+		getpid(),
+		[[NSDate date] timeIntervalSince1970]];
+	NSData *data = [identity dataUsingEncoding:NSUTF8StringEncoding];
+	const uint8_t *bytes = data.bytes;
+	NSUInteger remaining = data.length;
+	while (remaining > 0) {
+		ssize_t written = write(fd, bytes, remaining);
+		if (written <= 0) {
+			break;
+		}
+		bytes += written;
+		remaining -= (NSUInteger)written;
+	}
+	fsync(fd);
+	close(fd);
+	chmod(path.fileSystemRepresentation, 0666);
+	return YES;
+}
+
+BOOL AAPDiagWriteTransportResult(NSDictionary<NSString *, id> *result,
+	unsigned long long sequence,
+	NSString *source,
+	NSString *requestPath) {
+	NSMutableDictionary *payload =
+		[result mutableCopy] ?: [NSMutableDictionary dictionary];
+	payload[@"source"] = source ?: @"unknown";
+	payload[@"version"] = AAPDiagVersion;
+	payload[@"sequence"] = @(sequence);
+	payload[@"request_path"] = requestPath ?: @"";
+	payload[@"pid"] = @(getpid());
+	BOOL written = AAPDiagWritePlistToPaths(
+		payload,
+		AAPDiagResultPathsForSource(payload[@"source"]));
+	written = AAPDiagWritePlistToPaths(payload, AAPDiagBaseResultPaths()) ||
+		written;
+	AAPDiagLog(@"diag_marker source=%@ event=result_written "
+		@"sequence=%llu written=%d status=%@ variant=%@ "
+		@"rx_count=%lu request_path=%@",
+		payload[@"source"],
+		sequence,
+		written,
+		payload[@"status"] ?: @"unknown",
+		payload[@"socket_variant"] ?: @"none",
+		(unsigned long)[payload[@"rx_packets"] count],
+		requestPath ?: @"");
+	CFNotificationCenterPostNotification(
+		CFNotificationCenterGetDarwinNotifyCenter(),
+		(__bridge CFStringRef)AAPDiagDarwinNotification,
+		NULL,
+		NULL,
+		true);
+	notify_post(AAPDiagNotifyName);
+	return written;
+}
+
 BOOL AAPDiagWriteHelperReady(NSDictionary<NSString *, id> *ready) {
 	NSMutableDictionary *payload = [ready mutableCopy] ?: [NSMutableDictionary dictionary];
 	payload[@"pid"] = @(getpid());
 	payload[@"updated"] = @([[NSDate date] timeIntervalSince1970]);
-	BOOL written = AAPDiagWritePlistToPaths(payload, AAPDiagReadyPaths());
+	NSString *source = payload[@"source"];
+	NSArray<NSString *> *paths = source.length
+		? AAPDiagReadyPathsForSource(source)
+		: AAPDiagBaseReadyPaths();
+	BOOL written = AAPDiagWritePlistToPaths(payload, paths);
 	int token = 0;
 	if (notify_register_check(AAPDiagNotifyName, &token) == NOTIFY_STATUS_OK) {
 		uint64_t state = payload[@"sequence"]

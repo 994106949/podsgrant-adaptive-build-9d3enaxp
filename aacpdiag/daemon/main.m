@@ -19,47 +19,12 @@ static void AAPDiagDaemonWriteReady(NSString *status) {
 	});
 }
 
-static void AAPDiagDaemonWriteResult(NSDictionary<NSString *, id> *result,
-	unsigned long long sequence,
-	NSString *requestPath) {
-	NSMutableDictionary *payload =
-		[result mutableCopy] ?: [NSMutableDictionary dictionary];
-	payload[@"source"] = @"aacpdiagd";
-	payload[@"version"] = AAPDiagVersion;
-	payload[@"sequence"] = @(sequence);
-	payload[@"request_path"] = requestPath ?: @"";
-	BOOL written = AAPDiagWritePlistToPaths(payload, AAPDiagResultPaths());
-	AAPDiagLog(@"diag_marker source=aacpdiagd event=result_written "
-		@"sequence=%llu written=%d status=%@ variant=%@ rx_count=%lu",
-		sequence,
-		written,
-		payload[@"status"] ?: @"unknown",
-		payload[@"socket_variant"] ?: @"none",
-		(unsigned long)[payload[@"rx_packets"] count]);
-	notify_post(AAPDiagNotifyName);
-}
-
-static BOOL AAPDiagDaemonHandleRequest(NSString *path) {
-	NSData *data = [NSData dataWithContentsOfFile:path];
-	if (!data.length) {
-		return NO;
-	}
-	id plist = [NSPropertyListSerialization
-		propertyListWithData:data
-		options:NSPropertyListImmutable
-		format:nil
-		error:nil];
-	if (![plist isKindOfClass:[NSDictionary class]]) {
-		AAPDiagLog(@"diag_marker source=aacpdiagd "
-			@"event=request_plist_invalid path=%@", path);
-		return NO;
-	}
-
-	NSDictionary *request = plist;
+static void AAPDiagDaemonProcessRequest(
+	NSDictionary<NSString *, id> *request,
+	NSString *path,
+	unsigned long long sequence) {
 	NSString *address = AAPDiagNormalizeAddress(request[@"address"]);
 	unsigned int mode = [request[@"mode"] unsignedIntValue];
-	unsigned long long sequence =
-		[request[@"sequence"] unsignedLongLongValue];
 	AAPDiagLog(@"diag_marker source=aacpdiagd event=request_received "
 		@"sequence=%llu address=%@ mode=%u request_path=%@",
 		sequence,
@@ -67,7 +32,7 @@ static BOOL AAPDiagDaemonHandleRequest(NSString *path) {
 		mode,
 		path);
 	if (!address.length || sequence == 0) {
-		AAPDiagDaemonWriteResult(@{
+		AAPDiagWriteTransportResult(@{
 			@"status": @"invalid_request",
 			@"mode": @(mode),
 			@"address": address ?: @"",
@@ -76,8 +41,8 @@ static BOOL AAPDiagDaemonHandleRequest(NSString *path) {
 			],
 			@"rx_packets": @[],
 			@"timestamp": @([[NSDate date] timeIntervalSince1970]),
-		}, sequence, path);
-		return YES;
+		}, sequence, @"aacpdiagd", path);
+		return;
 	}
 
 	AAPDiagLog(@"helper_transport_start source=aacpdiagd "
@@ -86,63 +51,165 @@ static BOOL AAPDiagDaemonHandleRequest(NSString *path) {
 		address,
 		mode);
 	NSDictionary *transport = AAPDiagRunTransportTest(address, mode);
-	AAPDiagDaemonWriteResult(transport, sequence, path);
-	return YES;
+	AAPDiagWriteTransportResult(transport,
+		sequence,
+		@"aacpdiagd",
+		path);
 }
 
-static NSDictionary<NSString *, id> *AAPDiagDaemonReadRequest(NSString *path) {
-	NSData *data = [NSData dataWithContentsOfFile:path];
-	if (!data.length) {
-		return nil;
+static NSMutableSet<NSNumber *> *AAPDiagDaemonObservedSequences;
+static NSMutableSet<NSNumber *> *AAPDiagDaemonQueuedSequences;
+static NSMutableSet<NSNumber *> *AAPDiagDaemonHandledSequences;
+static dispatch_queue_t AAPDiagDaemonPollQueue;
+
+static void AAPDiagDaemonRemember(NSMutableSet<NSNumber *> **set,
+	unsigned long long sequence) {
+	if (!*set) {
+		*set = [NSMutableSet set];
 	}
-	id plist = [NSPropertyListSerialization
-		propertyListWithData:data
-		options:NSPropertyListImmutable
-		format:nil
-		error:nil];
-	if (![plist isKindOfClass:[NSDictionary class]]) {
-		return nil;
+	[*set addObject:@(sequence)];
+}
+
+static BOOL AAPDiagDaemonContains(NSMutableSet<NSNumber *> *set,
+	unsigned long long sequence) {
+	return [set containsObject:@(sequence)];
+}
+
+static void AAPDiagDaemonFallback(NSNumber *sequenceNumber,
+	NSString *requestPath) {
+	@autoreleasepool {
+		unsigned long long sequence = sequenceNumber.unsignedLongLongValue;
+		NSString *currentPath = nil;
+		NSDictionary<NSString *, id> *latest =
+			AAPDiagReadLatestRequest(&currentPath);
+		unsigned long long currentSequence =
+			[latest[@"sequence"] unsignedLongLongValue];
+		if (currentSequence != sequence) {
+			AAPDiagLog(@"diag_marker source=aacpdiagd "
+				@"event=fallback_superseded sequence=%llu current=%llu "
+				@"request_path=%@",
+				sequence,
+				currentSequence,
+				requestPath ?: @"");
+			return;
+		}
+
+		NSDictionary<NSString *, id> *existing =
+			AAPDiagReadHelperResult(sequence);
+		if (existing) {
+			AAPDiagDaemonRemember(&AAPDiagDaemonHandledSequences,
+				sequence);
+			AAPDiagLog(@"diag_marker source=aacpdiagd "
+				@"event=fallback_skipped reason=result_present "
+				@"sequence=%llu producer=%@ status=%@",
+				sequence,
+				existing[@"source"] ?: @"unknown",
+				existing[@"status"] ?: @"unknown");
+			return;
+		}
+
+		NSString *claimant = nil;
+		BOOL claimed = AAPDiagRequestIsClaimed(sequence, &claimant);
+		BOOL daemonOwnsClaim =
+			[claimant containsString:@"source=aacpdiagd"];
+		if (claimed && !daemonOwnsClaim) {
+			AAPDiagDaemonRemember(&AAPDiagDaemonHandledSequences,
+				sequence);
+			AAPDiagLog(@"diag_marker source=aacpdiagd "
+				@"event=fallback_skipped reason=helper_claimed "
+				@"sequence=%llu claimant=%@",
+				sequence,
+				claimant ?: @"unknown");
+			return;
+		}
+		if (!claimed &&
+			!AAPDiagClaimRequest(sequence, @"aacpdiagd")) {
+			AAPDiagRequestIsClaimed(sequence, &claimant);
+			AAPDiagLog(@"diag_marker source=aacpdiagd "
+				@"event=fallback_claim_failed sequence=%llu "
+				@"claimant=%@",
+				sequence,
+				claimant ?: @"unknown");
+			return;
+		}
+
+		AAPDiagDaemonRemember(&AAPDiagDaemonHandledSequences, sequence);
+		AAPDiagLog(@"diag_marker source=aacpdiagd "
+			@"event=fallback_claimed sequence=%llu request_path=%@",
+			sequence,
+			currentPath ?: @"");
+		AAPDiagDaemonProcessRequest(latest,
+			currentPath,
+			sequence);
 	}
-	return plist;
 }
 
 static void AAPDiagDaemonPoll(void) {
 	@autoreleasepool {
 		NSString *selectedPath = nil;
-		double selectedCreated = 0;
-		unsigned long long selectedSequence = 0;
-		NSArray<NSString *> *paths = AAPDiagRequestPaths();
-		for (NSString *path in paths) {
-			NSDictionary *request = AAPDiagDaemonReadRequest(path);
-			if (!request) {
-				continue;
-			}
-			double created = [request[@"created"] doubleValue];
-			unsigned long long sequence =
-				[request[@"sequence"] unsignedLongLongValue];
-			BOOL newer = created > selectedCreated + 0.000001;
-			BOOL sameTime = fabs(created - selectedCreated) <= 0.000001;
-			if (!selectedPath || newer ||
-				(sameTime && sequence > selectedSequence)) {
-				selectedCreated = created;
-				selectedPath = path;
-				selectedSequence = sequence;
-			}
-		}
-		if (!selectedPath) {
+		NSDictionary<NSString *, id> *request =
+			AAPDiagReadLatestRequest(&selectedPath);
+		unsigned long long sequence =
+			[request[@"sequence"] unsignedLongLongValue];
+		if (!request || sequence == 0) {
 			return;
 		}
-		NSString *requestKey = [NSString stringWithFormat:@"created=%.6f sequence=%llu",
-			selectedCreated,
-			selectedSequence];
-		static NSString *lastRequestKey;
-		if ([lastRequestKey isEqualToString:requestKey]) {
+		if (AAPDiagDaemonContains(AAPDiagDaemonHandledSequences,
+				sequence) ||
+			AAPDiagDaemonContains(AAPDiagDaemonQueuedSequences,
+				sequence)) {
 			return;
 		}
-		lastRequestKey = requestKey;
-		AAPDiagLog(@"diag_marker source=aacpdiagd event=request_poll "
-			@"sequence=%llu path=%@", selectedSequence, selectedPath);
-		AAPDiagDaemonHandleRequest(selectedPath);
+
+		if (!AAPDiagDaemonContains(AAPDiagDaemonObservedSequences,
+				sequence)) {
+			AAPDiagDaemonRemember(&AAPDiagDaemonObservedSequences,
+				sequence);
+			AAPDiagLog(@"diag_marker source=aacpdiagd "
+				@"event=request_poll sequence=%llu path=%@",
+				sequence,
+				selectedPath ?: @"");
+		}
+
+		NSDictionary<NSString *, id> *existing =
+			AAPDiagReadHelperResult(sequence);
+		if (existing) {
+			AAPDiagDaemonRemember(&AAPDiagDaemonHandledSequences,
+				sequence);
+			AAPDiagLog(@"diag_marker source=aacpdiagd "
+				@"event=request_completed sequence=%llu producer=%@ "
+				@"status=%@",
+				sequence,
+				existing[@"source"] ?: @"unknown",
+				existing[@"status"] ?: @"unknown");
+			return;
+		}
+
+		NSString *claimant = nil;
+		if (AAPDiagRequestIsClaimed(sequence, &claimant) &&
+			![claimant containsString:@"source=aacpdiagd"]) {
+			AAPDiagDaemonRemember(&AAPDiagDaemonHandledSequences,
+				sequence);
+			AAPDiagLog(@"diag_marker source=aacpdiagd "
+				@"event=request_claimed sequence=%llu claimant=%@",
+				sequence,
+				claimant ?: @"unknown");
+			return;
+		}
+
+		AAPDiagDaemonRemember(&AAPDiagDaemonQueuedSequences, sequence);
+		NSNumber *sequenceNumber = @(sequence);
+		NSString *requestPath = [selectedPath copy];
+		dispatch_after(
+			dispatch_time(DISPATCH_TIME_NOW, 750ULL * NSEC_PER_MSEC),
+			AAPDiagDaemonPollQueue,
+			^{
+				if (AAPDiagDaemonQueuedSequences) {
+					[AAPDiagDaemonQueuedSequences
+						removeObject:sequenceNumber];
+				}
+				AAPDiagDaemonFallback(sequenceNumber, requestPath);
+			});
 	}
 }
 
@@ -172,14 +239,14 @@ int main(int argc, char **argv) {
 		signal(SIGINT, AAPDiagDaemonSignal);
 		signal(SIGHUP, SIG_IGN);
 
-		dispatch_queue_t pollQueue = dispatch_queue_create(
+		AAPDiagDaemonPollQueue = dispatch_queue_create(
 			"com.lns.pogr.aacpdiagd.poll",
 			DISPATCH_QUEUE_SERIAL);
 		int token = 0;
 		int notifyStatus = notify_register_dispatch(
 			AAPDiagNotifyName,
 			&token,
-			pollQueue,
+			AAPDiagDaemonPollQueue,
 			^(int notifiedToken) {
 				(void)notifiedToken;
 				AAPDiagDaemonPoll();
@@ -200,7 +267,7 @@ int main(int argc, char **argv) {
 			DISPATCH_SOURCE_TYPE_TIMER,
 			0,
 			0,
-			pollQueue);
+			AAPDiagDaemonPollQueue);
 		uint64_t interval = 250ULL * NSEC_PER_MSEC;
 		dispatch_source_set_timer(timer,
 			dispatch_time(DISPATCH_TIME_NOW, (int64_t)interval),
@@ -210,7 +277,7 @@ int main(int argc, char **argv) {
 			AAPDiagDaemonPoll();
 		});
 		dispatch_resume(timer);
-		dispatch_async(pollQueue, ^{
+		dispatch_async(AAPDiagDaemonPollQueue, ^{
 			AAPDiagDaemonPoll();
 		});
 		dispatch_main();

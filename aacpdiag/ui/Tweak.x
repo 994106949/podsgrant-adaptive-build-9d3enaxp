@@ -88,38 +88,128 @@ static NSString *AAPDiagStatusSummary(NSDictionary *result) {
 		AAPDiagFirstPacket(result)];
 }
 
-static NSString *AAPDiagReadySummary(NSDictionary *ready) {
-	if (![ready isKindOfClass:[NSDictionary class]]) {
-		return @"daemon_not_loaded";
-	}
-	NSString *status = ready[@"status"] ?: @"daemon_unknown";
-	NSString *executable = ready[@"executable"] ?: @"?";
-	NSString *version = ready[@"version"] ?: @"?";
-	return [NSString stringWithFormat:@"%@ source=%@ version=%@ exe=%@ pid=%@",
-		status,
-		ready[@"source"] ?: @"?",
-		version,
-		executable.lastPathComponent ?: executable,
-		ready[@"pid"] ?: @"?"];
-}
-
 static BOOL AAPDiagResultHasProtocolACK(NSDictionary *result) {
 	return [result[@"status"] isEqualToString:@"protocol_ack"];
 }
 
-static NSDictionary *AAPDiagWaitForDaemonResult(
+static NSArray<NSString *> *AAPDiagTransportSources(void) {
+	return @[@"bluetoothd", @"heard", @"aacpdiagd"];
+}
+
+static NSDictionary<NSString *, id> *AAPDiagReadTransportReadiness(void) {
+	NSMutableDictionary<NSString *, id> *readiness =
+		[NSMutableDictionary dictionary];
+	for (NSString *source in AAPDiagTransportSources()) {
+		readiness[source] =
+			AAPDiagReadReadyForSource(source) ?: @{
+				@"status": @"not_loaded",
+				@"source": source,
+			};
+	}
+	return readiness;
+}
+
+static NSString *AAPDiagTransportReadinessSummary(
+	NSDictionary<NSString *, id> *readiness) {
+	NSMutableArray<NSString *> *parts = [NSMutableArray array];
+	if (![readiness isKindOfClass:[NSDictionary class]]) {
+		return @"invalid";
+	}
+	for (NSString *source in AAPDiagTransportSources()) {
+		id value = readiness[source];
+		if (![value isKindOfClass:[NSDictionary class]]) {
+			[parts addObject:[NSString stringWithFormat:@"%@:invalid",
+				source]];
+			continue;
+		}
+		NSDictionary *ready = value;
+		NSString *status = ready[@"status"] ?: @"unknown";
+		[parts addObject:[NSString stringWithFormat:@"%@:%@",
+			source,
+			status]];
+	}
+	return parts.count
+		? [parts componentsJoinedByString:@" "]
+		: @"none";
+}
+
+static NSInteger AAPDiagTransportResultPriority(NSDictionary *result) {
+	if (![result isKindOfClass:[NSDictionary class]]) {
+		return -1;
+	}
+	NSString *status = result[@"status"];
+	if ([status isEqualToString:@"protocol_ack"]) {
+		return 100;
+	}
+	if ([status isEqualToString:@"protocol_reply_mismatch"]) {
+		return 80;
+	}
+	if ([status isEqualToString:@"invalid_request"]) {
+		return 60;
+	}
+	if ([status isEqualToString:@"timed_out"]) {
+		return 50;
+	}
+	if ([status isEqualToString:@"connect_failed"]) {
+		return 40;
+	}
+	return 20;
+}
+
+static NSDictionary *AAPDiagWaitForTransportResult(
 	unsigned long long sequence,
-	NSTimeInterval timeout) {
+	NSTimeInterval timeout,
+	NSDictionary<NSString *, id> **resultsBySource,
+	NSDictionary<NSString *, id> **readinessAfter) {
 	NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout];
+	NSMutableDictionary<NSString *, NSDictionary *> *results =
+		[NSMutableDictionary dictionary];
 	while ([deadline timeIntervalSinceNow] > 0) {
-		NSDictionary *result =
-			AAPDiagReadResultForSource(sequence, @"aacpdiagd");
-		if (result) {
-			return result;
+		for (NSString *source in AAPDiagTransportSources()) {
+			if (results[source]) {
+				continue;
+			}
+			NSDictionary *result =
+				AAPDiagReadResultForSource(sequence, source);
+			if (result) {
+				results[source] = result;
+				AAPDiagLog(@"transport_result source=%@ sequence=%llu "
+					@"summary=%@",
+					source,
+					sequence,
+					AAPDiagStatusSummary(result));
+			}
+		}
+		for (NSDictionary *result in results.allValues) {
+			if (AAPDiagResultHasProtocolACK(result)) {
+				if (resultsBySource) {
+					*resultsBySource = results;
+				}
+				if (readinessAfter) {
+					*readinessAfter =
+						AAPDiagReadTransportReadiness();
+				}
+				return result;
+			}
 		}
 		[NSThread sleepForTimeInterval:0.1];
 	}
-	return nil;
+	NSDictionary *best = nil;
+	NSInteger bestPriority = -1;
+	for (NSDictionary *result in results.allValues) {
+		NSInteger priority = AAPDiagTransportResultPriority(result);
+		if (priority > bestPriority) {
+			best = result;
+			bestPriority = priority;
+		}
+	}
+	if (resultsBySource) {
+		*resultsBySource = results;
+	}
+	if (readinessAfter) {
+		*readinessAfter = AAPDiagReadTransportReadiness();
+	}
+	return best;
 }
 
 static NSDictionary *AAPDiagRunCombinedTest(
@@ -188,19 +278,22 @@ static NSDictionary *AAPDiagRunCombinedTest(
 		@"native": nativeResult,
 	} mutableCopy];
 
-	NSDictionary *daemonResult = nil;
+	NSDictionary *transportResult = nil;
+	NSDictionary<NSString *, id> *transportResults = @{};
+	NSDictionary<NSString *, id> *transportReadinessAfter = @{};
 	if (address.length) {
 		BOOL posted = AAPDiagWriteHelperRequest(address, mode, sequence);
-		AAPDiagLog(@"daemon_request posted=%d sequence=%llu mode=%u",
+		AAPDiagLog(@"transport_request posted=%d sequence=%llu mode=%u",
 			posted,
 			sequence,
 			mode);
 		if (posted) {
-			NSDictionary *readyBefore =
-				AAPDiagReadReadyForSource(@"aacpdiagd");
-			combined[@"daemon_ready"] = readyBefore ?: @{
-				@"status": @"daemon_not_loaded",
-			};
+			NSDictionary<NSString *, id> *readyBefore =
+				AAPDiagReadTransportReadiness();
+			combined[@"transport_ready"] = readyBefore;
+			AAPDiagLog(@"ui_transport_ready_before sequence=%llu %@",
+				sequence,
+				AAPDiagTransportReadinessSummary(readyBefore));
 			CFNotificationCenterPostNotification(
 				CFNotificationCenterGetDarwinNotifyCenter(),
 				(__bridge CFStringRef)AAPDiagDarwinNotification,
@@ -208,32 +301,63 @@ static NSDictionary *AAPDiagRunCombinedTest(
 				NULL,
 				true);
 			notify_post(AAPDiagNotifyName);
-			daemonResult = AAPDiagWaitForDaemonResult(sequence, 4.0);
-			if (!daemonResult) {
-				NSDictionary *readyAfter =
-					AAPDiagReadReadyForSource(@"aacpdiagd");
-				combined[@"daemon_ready_after"] = readyAfter ?: @{};
-				daemonResult = @{
-					@"status": readyAfter
-						? @"daemon_loaded_no_reply"
-						: @"daemon_not_loaded",
-					@"source": @"aacpdiagd",
+			transportResult = AAPDiagWaitForTransportResult(
+				sequence,
+				30.0,
+				&transportResults,
+				&transportReadinessAfter);
+			combined[@"transport_results"] = transportResults;
+			combined[@"transport_ready_after"] =
+				transportReadinessAfter;
+			AAPDiagLog(@"ui_transport_ready_after sequence=%llu %@",
+				sequence,
+				AAPDiagTransportReadinessSummary(
+					transportReadinessAfter));
+			if (!transportResult) {
+				NSDictionary<NSString *, id> *readyAfter =
+					transportReadinessAfter;
+				BOOL anyLoaded = NO;
+				for (id value in readyAfter.allValues) {
+					if (![value isKindOfClass:[NSDictionary class]]) {
+						continue;
+					}
+					NSDictionary *ready = value;
+					NSString *status = ready[@"status"];
+					if (status &&
+						![status isEqualToString:@"not_loaded"]) {
+						anyLoaded = YES;
+						break;
+					}
+				}
+				transportResult = @{
+					@"status": anyLoaded
+						? @"transport_no_reply"
+						: @"transport_not_loaded",
+					@"source": @"none",
 				};
 			}
-			combined[@"daemon"] = daemonResult;
-			AAPDiagLog(@"ui_daemon_result mode=%u summary=%@",
+			combined[@"transport"] = transportResult;
+			combined[@"transport_source"] =
+				transportResult[@"source"] ?: @"none";
+			combined[@"transport_ready"] = transportReadinessAfter;
+			AAPDiagLog(@"ui_transport_result mode=%u source=%@ "
+				@"summary=%@ results=%lu",
 				mode,
-				AAPDiagStatusSummary(daemonResult));
+				combined[@"transport_source"],
+				AAPDiagStatusSummary(transportResult),
+				(unsigned long)transportResults.count);
 		} else {
-			combined[@"daemon"] = @{
+			transportResult = @{
 				@"status": @"request_write_failed",
-				@"source": @"aacpdiagd",
+				@"source": @"none",
 			};
+			combined[@"transport"] = transportResult;
+			combined[@"transport_source"] = @"none";
 		}
 	}
 
-	NSDictionary *daemonFinal = combined[@"daemon"];
-	BOOL daemonACK = AAPDiagResultHasProtocolACK(daemonFinal);
+	BOOL transportACK =
+		AAPDiagResultHasProtocolACK(transportResult);
 	NSString *nativeStatus = nativeResult[@"status"];
 	BOOL nativeInvoked =
 		[nativeStatus isEqualToString:
@@ -245,7 +369,7 @@ static NSDictionary *AAPDiagRunCombinedTest(
 	BOOL setterMissing =
 		[nativeStatus isEqualToString:@"native_setter_missing"] ||
 		[nativeStatus isEqualToString:@"setter_missing"];
-	combined[@"status"] = daemonACK
+	combined[@"status"] = transportACK
 		? @"protocol_ack"
 		: (nativeInvoked
 			? @"native_setter_invoked_unconfirmed"
@@ -270,11 +394,13 @@ static NSDictionary *AAPDiagRunCombinedTest(
 		finalGetterAvailable,
 		finalGetter);
 	AAPDiagLog(@"getter is not device confirmation");
-	AAPDiagLog(@"ui_combined_result mode=%u status=%@ native=%@ daemon=%@",
+	AAPDiagLog(@"ui_combined_result mode=%u status=%@ native=%@ "
+		@"transport=%@ source=%@",
 		mode,
 		combined[@"status"],
 		nativeStatus ?: @"unknown",
-		AAPDiagStatusSummary(daemonFinal));
+		AAPDiagStatusSummary(transportResult),
+		combined[@"transport_source"] ?: @"none");
 	return combined;
 }
 
@@ -323,15 +449,29 @@ static void AAPDiagShowResult(BTSDeviceConfigController *controller,
 	NSDictionary *after = [native[@"after"] isKindOfClass:[NSDictionary class]]
 		? native[@"after"]
 		: @{};
+	NSDictionary *transportReady =
+		[result[@"transport_ready"] isKindOfClass:[NSDictionary class]]
+			? result[@"transport_ready"]
+			: @{};
+	NSDictionary *transportResults =
+		[result[@"transport_results"] isKindOfClass:[NSDictionary class]]
+			? result[@"transport_results"]
+			: @{};
+	NSArray<NSString *> *resultSources = transportResults.allKeys ?: @[];
 	NSString *message = [NSString stringWithFormat:
 		@"Native: %@\nLocal getter (informational only): %@ -> %@\n"
-		@"Daemon: %@\nReady: %@\n\nLog: %@",
+		@"Transport: %@\nSource: %@\nReady: %@\n"
+		@"Result sources: %@\n\nLog: %@",
 		native[@"status"] ?: @"none",
 		before[@"description"] ?: @"unavailable",
 		after[@"description"] ?: @"unavailable",
-		AAPDiagStatusSummary(result[@"daemon"]),
-		AAPDiagReadySummary(result[@"daemon_ready_after"] ?:
-			result[@"daemon_ready"]),
+		AAPDiagStatusSummary(result[@"transport"]),
+		result[@"transport_source"] ?: @"none",
+		AAPDiagTransportReadinessSummary(
+			transportReady),
+		resultSources.count
+			? [resultSources componentsJoinedByString:@", "]
+			: @"none",
 		AAPDiagLogPath];
 	if (!ack && [result[@"status"] isEqualToString:@"device_missing"]) {
 		message = [message stringByAppendingString:

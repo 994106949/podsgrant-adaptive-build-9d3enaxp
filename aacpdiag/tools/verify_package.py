@@ -151,16 +151,21 @@ def main() -> int:
     control = read_control(members)
     if control.get("Package") != "com.lns.pogr.aacpdiag":
         raise ValueError(f"unexpected Package: {control.get('Package')!r}")
-    if control.get("Version") != "0.5.7~adts3diag7":
+    if control.get("Version") != "0.5.8~adts3diag8":
         raise ValueError(f"unexpected Version: {control.get('Version')!r}")
 
     expected_scripts = {
         "postinst": (
-            b"0.5.7~adts3diag7",
+            b"0.5.8~adts3diag8",
+            b"source_ready_file",
+            b"claim-*",
             b"daemon_direct_fallback_begin",
+            b"daemon_direct_fallback_status",
             b"/var/jb/usr/bin/aacpdiagd",
         ),
         "postrm": (
+            b"claim-*",
+            b"result-heard.plist",
             b"bootout",
             b"killall",
         ),
@@ -304,24 +309,24 @@ def main() -> int:
     binary_markers = {
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiag.dylib": (
             b"source=aacp_ui",
-            b"0.5.7~adts3diag7",
+            b"0.5.8~adts3diag8",
         ),
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiagHelper.dylib": (
             b"source=helper",
-            b"0.5.7~adts3diag7",
+            b"0.5.8~adts3diag8",
         ),
         "usr/bin/aacpdiagd": (
             b"source=aacpdiagd",
-            b"0.5.7~adts3diag7",
+            b"0.5.8~adts3diag8",
         ),
     }
     runtime_markers = {
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiag.dylib": (
-            b"diag7_runtime_discovery",
+            b"diag8_helper_transport",
         ),
         "Library/MobileSubstrate/DynamicLibraries/"
         "PodsGrantAACPDiagHelper.dylib": (
-            b"diag7_runtime_discovery",
+            b"diag8_helper_transport",
         ),
     }
     for binary_name, markers in runtime_markers.items():

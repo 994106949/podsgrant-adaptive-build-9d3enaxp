@@ -3,7 +3,7 @@
 LOG=/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.log
 BOOT_LOG=/var/tmp/com.lns.pogr.aacpdiag/helper-boot.log
 TMP_BOOT_LOG=/tmp/com.lns.pogr.aacpdiag/helper-boot.log
-PACKAGE_VERSION=0.5.7~adts3diag7
+PACKAGE_VERSION=0.5.8~adts3diag8
 PLIST=/var/jb/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist
 DAEMON=/var/jb/usr/bin/aacpdiagd
 PACKAGE_PATH="${DPKG_ADMINDIR:-/var/lib/dpkg}/info/com.lns.pogr.aacpdiag.list"
@@ -30,8 +30,11 @@ log_line() {
 	done
 }
 
-daemon_ready_file() {
+source_ready_file() {
 	for candidate in \
+		/var/tmp/com.lns.pogr.aacpdiag/helper-bluetoothd.plist \
+		/var/tmp/com.lns.pogr.aacpdiag/helper-heard.plist \
+		/var/tmp/com.lns.pogr.aacpdiag/helper-aacpdiagd.plist \
 		/var/tmp/com.lns.pogr.aacpdiag/helper.plist \
 		/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper.plist \
 		/tmp/com.lns.pogr.aacpdiag/helper.plist
@@ -50,7 +53,7 @@ wait_for_daemon() {
 		if [ -n "$DAEMON_PID" ]; then
 			return 0
 		fi
-		if daemon_ready_file; then
+		if source_ready_file; then
 			return 0
 		fi
 		attempt=$((attempt + 1))
@@ -99,14 +102,34 @@ rm -f \
 	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.request.plist \
 	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result.plist \
 	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper.plist \
+	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result-bluetoothd.plist \
+	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result-heard.plist \
+	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.result-aacpdiagd.plist \
+	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper-bluetoothd.plist \
+	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper-heard.plist \
+	/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper-aacpdiagd.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/request.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/result.plist \
 	/var/tmp/com.lns.pogr.aacpdiag/helper.plist \
+	/var/tmp/com.lns.pogr.aacpdiag/result-bluetoothd.plist \
+	/var/tmp/com.lns.pogr.aacpdiag/result-heard.plist \
+	/var/tmp/com.lns.pogr.aacpdiag/result-aacpdiagd.plist \
+	/var/tmp/com.lns.pogr.aacpdiag/helper-bluetoothd.plist \
+	/var/tmp/com.lns.pogr.aacpdiag/helper-heard.plist \
+	/var/tmp/com.lns.pogr.aacpdiag/helper-aacpdiagd.plist \
+	/var/tmp/com.lns.pogr.aacpdiag/claim-* \
 	/var/tmp/com.lns.pogr.aacpdiag/daemon-stdout.log \
 	/var/tmp/com.lns.pogr.aacpdiag/daemon-stderr.log \
 	/tmp/com.lns.pogr.aacpdiag/request.plist \
 	/tmp/com.lns.pogr.aacpdiag/result.plist \
-	/tmp/com.lns.pogr.aacpdiag/helper.plist
+	/tmp/com.lns.pogr.aacpdiag/helper.plist \
+	/tmp/com.lns.pogr.aacpdiag/result-bluetoothd.plist \
+	/tmp/com.lns.pogr.aacpdiag/result-heard.plist \
+	/tmp/com.lns.pogr.aacpdiag/result-aacpdiagd.plist \
+	/tmp/com.lns.pogr.aacpdiag/helper-bluetoothd.plist \
+	/tmp/com.lns.pogr.aacpdiag/helper-heard.plist \
+	/tmp/com.lns.pogr.aacpdiag/helper-aacpdiagd.plist \
+	/tmp/com.lns.pogr.aacpdiag/claim-*
 
 log_line "daemon_bootout_begin label=com.lns.pogr.aacpdiagd"
 launchctl bootout system/com.lns.pogr.aacpdiagd >> "$LOG" 2>&1

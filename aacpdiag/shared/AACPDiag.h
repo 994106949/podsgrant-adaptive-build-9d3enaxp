@@ -56,6 +56,19 @@ NSDictionary<NSString *, id> * _Nullable AAPDiagReadHelperResult(
 NSDictionary<NSString *, id> * _Nullable AAPDiagReadResultForSource(
 	unsigned long long sequence,
 	NSString * _Nullable source);
+NSDictionary<NSString *, id> * _Nullable AAPDiagReadLatestRequest(
+	NSString * _Nullable * _Nullable selectedPath);
+BOOL AAPDiagWriteTransportResult(
+	NSDictionary<NSString *, id> *result,
+	unsigned long long sequence,
+	NSString *source,
+	NSString * _Nullable requestPath);
+BOOL AAPDiagRequestIsClaimed(
+	unsigned long long sequence,
+	NSString * _Nullable * _Nullable claimant);
+BOOL AAPDiagClaimRequest(
+	unsigned long long sequence,
+	NSString *source);
 BOOL AAPDiagWritePlistToPaths(NSDictionary<NSString *, id> *plist,
 	NSArray<NSString *> *paths);
 BOOL AAPDiagWriteHelperReady(NSDictionary<NSString *, id> *ready);

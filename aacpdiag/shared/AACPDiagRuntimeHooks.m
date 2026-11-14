@@ -843,6 +843,7 @@ void AAPDiagInstallRuntimeHooks(void) {
 					AAPDiagInstallClassHooksOnce();
 				});
 		}
-		AAPDiagLog(@"diag_marker phase=runtime_hooks_installed");
+		AAPDiagLog(@"diag_marker phase=runtime_hooks_installed "
+			@"marker=diag8_helper_transport");
 	});
 }
