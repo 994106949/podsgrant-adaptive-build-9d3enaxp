@@ -136,12 +136,46 @@ static NSDictionary *AAPDiagRunCombinedTest(
 		mode,
 		address);
 
-	NSDictionary *nativeResult = AAPDiagRunNativeTest(device, mode);
-	AAPDiagLog(@"ui_native_result mode=%u status=%@ before=%@ after=%@",
+	NSArray *candidates = AAPDiagDiscoverDeviceCandidates(address);
+	NSMutableArray *testCandidates = [NSMutableArray array];
+	for (id candidate in candidates ?: @[]) {
+		BOOL duplicate = NO;
+		for (id existing in testCandidates) {
+			if (existing == candidate) {
+				duplicate = YES;
+				break;
+			}
+		}
+		if (!duplicate) {
+			[testCandidates addObject:candidate];
+		}
+	}
+	BOOL devicePresent = NO;
+	for (id existing in testCandidates) {
+		if (existing == device) {
+			devicePresent = YES;
+			break;
+		}
+	}
+	if (device && !devicePresent) {
+		[testCandidates addObject:device];
+	}
+	AAPDiagLog(@"ui_candidates mode=%u expected=%@ count=%lu "
+		@"merged_device=%d",
+		mode,
+		address ?: @"",
+		(unsigned long)testCandidates.count,
+		device ? 1 : 0);
+	NSDictionary *nativeResult = testCandidates.count
+		? AAPDiagRunNativeTestOnCandidates(testCandidates, address, mode)
+		: AAPDiagRunNativeTest(device, mode);
+	AAPDiagLog(@"ui_native_result mode=%u status=%@ before=%@ after=%@ "
+		@"candidates=%lu",
 		mode,
 		nativeResult[@"status"] ?: @"unknown",
 		nativeResult[@"before"] ?: @{},
-		nativeResult[@"after"] ?: @{});
+		nativeResult[@"after"] ?: @{},
+		(unsigned long)testCandidates.count);
 
 	unsigned long long sequence =
 		(unsigned long long)([[NSDate date] timeIntervalSince1970] * 1000.0) +
@@ -174,7 +208,7 @@ static NSDictionary *AAPDiagRunCombinedTest(
 				NULL,
 				true);
 			notify_post(AAPDiagNotifyName);
-			daemonResult = AAPDiagWaitForDaemonResult(sequence, 25.0);
+			daemonResult = AAPDiagWaitForDaemonResult(sequence, 4.0);
 			if (!daemonResult) {
 				NSDictionary *readyAfter =
 					AAPDiagReadReadyForSource(@"aacpdiagd");
@@ -200,11 +234,26 @@ static NSDictionary *AAPDiagRunCombinedTest(
 
 	NSDictionary *daemonFinal = combined[@"daemon"];
 	BOOL daemonACK = AAPDiagResultHasProtocolACK(daemonFinal);
-	BOOL localGetterOnly =
-		[nativeResult[@"status"] isEqualToString:@"local_getter_only"];
+	NSString *nativeStatus = nativeResult[@"status"];
+	BOOL nativeInvoked =
+		[nativeStatus isEqualToString:
+			@"native_setters_invoked_unconfirmed"] ||
+		[nativeStatus isEqualToString:@"local_getter_only"];
+	BOOL deviceMissing =
+		[nativeStatus isEqualToString:@"native_device_missing"] ||
+		[nativeStatus isEqualToString:@"device_missing"];
+	BOOL setterMissing =
+		[nativeStatus isEqualToString:@"native_setter_missing"] ||
+		[nativeStatus isEqualToString:@"setter_missing"];
 	combined[@"status"] = daemonACK
 		? @"protocol_ack"
-		: (localGetterOnly ? @"local_getter_only" : @"no_confirmation");
+		: (nativeInvoked
+			? @"native_setter_invoked_unconfirmed"
+			: (deviceMissing
+				? @"device_missing"
+				: (setterMissing
+					? @"setter_missing"
+					: @"no_confirmation")));
 
 	BOOL finalGetterAvailable = NO;
 	unsigned int finalGetter =
@@ -220,12 +269,34 @@ static NSDictionary *AAPDiagRunCombinedTest(
 	AAPDiagLog(@"local_getter after available=%d value=%u (not used as success)",
 		finalGetterAvailable,
 		finalGetter);
+	AAPDiagLog(@"getter is not device confirmation");
 	AAPDiagLog(@"ui_combined_result mode=%u status=%@ native=%@ daemon=%@",
 		mode,
 		combined[@"status"],
-		nativeResult[@"status"] ?: @"unknown",
+		nativeStatus ?: @"unknown",
 		AAPDiagStatusSummary(daemonFinal));
 	return combined;
+}
+
+static NSString *AAPDiagConfirmationTitle(NSDictionary *result) {
+	NSString *status = result[@"status"] ?: @"unknown";
+	if ([status isEqualToString:@"protocol_ack"]) {
+		return @"Protocol ACK";
+	}
+	if ([status isEqualToString:
+		@"native_setter_invoked_unconfirmed"]) {
+		return @"Native Setter Invoked / Unconfirmed";
+	}
+	if ([status isEqualToString:@"local_getter_only"]) {
+		return @"Local Getter Only";
+	}
+	if ([status isEqualToString:@"device_missing"]) {
+		return @"Device Missing";
+	}
+	if ([status isEqualToString:@"setter_missing"]) {
+		return @"Setter Missing";
+	}
+	return @"No Confirmation";
 }
 
 static void AAPDiagShowResult(BTSDeviceConfigController *controller,
@@ -242,7 +313,7 @@ static void AAPDiagShowResult(BTSDeviceConfigController *controller,
 	BOOL ack = AAPDiagResultHasProtocolACK(result);
 	NSString *title = [NSString stringWithFormat:@"AACP %@: %@",
 		AAPDiagModeName(mode),
-		ack ? @"Protocol ACK" : @"No Confirmation"];
+		AAPDiagConfirmationTitle(result)];
 	NSDictionary *native = [result[@"native"] isKindOfClass:[NSDictionary class]]
 		? result[@"native"]
 		: @{};
@@ -262,6 +333,11 @@ static void AAPDiagShowResult(BTSDeviceConfigController *controller,
 		AAPDiagReadySummary(result[@"daemon_ready_after"] ?:
 			result[@"daemon_ready"]),
 		AAPDiagLogPath];
+	if (!ack && [result[@"status"] isEqualToString:@"device_missing"]) {
+		message = [message stringByAppendingString:
+			@"\n\nIf Device Missing: manually switch ANC/Transparency "
+			@"once in Settings, return here, then retry."];
+	}
 	UIAlertController *alert = [UIAlertController
 		alertControllerWithTitle:title
 		message:message
@@ -403,5 +479,6 @@ static void AAPDiagShowResult(BTSDeviceConfigController *controller,
 			@"/System/Library/PreferenceBundles/BluetoothSettings.bundle"]
 			load];
 		%init(AAPDiagHooks);
+		AAPDiagInstallRuntimeHooks();
 	}
 }

@@ -61,13 +61,18 @@ static AAPDiagMethodRecord AAPDiagMethodRecords[AAP_DIAG_HOOK_RECORDS];
 static size_t AAPDiagMethodRecordCount;
 static pthread_mutex_t AAPDiagMethodLock = PTHREAD_MUTEX_INITIALIZER;
 static __thread int AAPDiagMethodHookDepth;
-static BOOL AAPDiagInventoriedClasses[4];
+static NSMutableSet<NSString *> *AAPDiagInventoriedClasses;
+static pthread_mutex_t AAPDiagInventoryLock = PTHREAD_MUTEX_INITIALIZER;
 
 static const char *const AAPDiagWatchedClasses[] = {
 	"BluetoothDevice",
 	"BluetoothManager",
 	"PAAccessoryManager",
 	"BTSDeviceConfigController",
+	"BTSDeviceClassic",
+	"BTSDevice",
+	"HeardController",
+	"AudioAccessoryManager",
 };
 
 static const char *const AAPDiagCoreSelectors[] = {
@@ -724,14 +729,27 @@ static void AAPDiagHookClassMethods(Class cls, BOOL classMethods) {
 
 static void AAPDiagInstallClassHooksForName(const char *className,
 	size_t inventoryIndex) {
+	(void)inventoryIndex;
 	Class cls = objc_getClass(className);
 	if (!cls) {
 		return;
 	}
 
-	if (inventoryIndex < 4 && !AAPDiagInventoriedClasses[inventoryIndex]) {
-		AAPDiagInventoriedClasses[inventoryIndex] = YES;
+	BOOL inventory = NO;
+	pthread_mutex_lock(&AAPDiagInventoryLock);
+	if (!AAPDiagInventoriedClasses) {
+		AAPDiagInventoriedClasses = [NSMutableSet set];
+	}
+	NSString *key = [NSString stringWithUTF8String:className];
+	if (key && ![AAPDiagInventoriedClasses containsObject:key]) {
+		[AAPDiagInventoriedClasses addObject:key];
+		inventory = YES;
+	}
+	pthread_mutex_unlock(&AAPDiagInventoryLock);
+	if (inventory) {
 		AAPDiagLog(@"diag_marker phase=runtime_class_found class=%s",
+			className);
+		AAPDiagLog(@"diag_marker phase=diag7_runtime_discovery class=%s",
 			className);
 		AAPDiagLogClassInventory(
 			[NSString stringWithFormat:@"bluetoothd:%s", className],

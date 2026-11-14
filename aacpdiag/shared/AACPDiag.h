@@ -39,6 +39,11 @@ NSDictionary<NSString *, id> *AAPDiagRunTransportTest(NSString *address,
 
 NSDictionary<NSString *, id> *AAPDiagRunNativeTest(id _Nullable device,
 	unsigned int mode);
+NSArray *AAPDiagDiscoverDeviceCandidates(NSString * _Nullable expectedAddress);
+NSDictionary<NSString *, id> *AAPDiagRunNativeTestOnCandidates(
+	NSArray * _Nullable candidates,
+	NSString * _Nullable expectedAddress,
+	unsigned int mode);
 
 void AAPDiagLogClassInventory(NSString *scope, id _Nullable object);
 void AAPDiagInstallRuntimeHooks(void);

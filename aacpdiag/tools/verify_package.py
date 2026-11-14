@@ -55,7 +55,9 @@ def normalize_payload_name(name: str) -> str:
     return normalized
 
 
-def read_control(members: dict[str, bytes]) -> dict[str, str]:
+def read_control_archive(
+    members: dict[str, bytes],
+) -> tuple[str, tarfile.TarFile]:
     control_name = next(
         name for name in members if name.startswith("control.tar")
     )
@@ -66,8 +68,13 @@ def read_control(members: dict[str, bytes]) -> dict[str, str]:
         data = lzma.decompress(data)
     elif control_name.endswith(".lzma"):
         data = lzma.decompress(data)
+    return control_name, tarfile.open(fileobj=io.BytesIO(data))
+
+
+def read_control(members: dict[str, bytes]) -> dict[str, str]:
+    _, archive = read_control_archive(members)
     values: dict[str, str] = {}
-    with tarfile.open(fileobj=io.BytesIO(data)) as archive:
+    with archive:
         member_name = next(
             item.name
             for item in archive.getmembers()
@@ -81,6 +88,19 @@ def read_control(members: dict[str, bytes]) -> dict[str, str]:
                 key, value = line.split(": ", 1)
                 values[key] = value
     return values
+
+
+def read_control_scripts(
+    members: dict[str, bytes],
+) -> dict[str, tarfile.TarInfo]:
+    _, archive = read_control_archive(members)
+    scripts: dict[str, tarfile.TarInfo] = {}
+    with archive:
+        for item in archive.getmembers():
+            name = item.name.lstrip("./")
+            if item.isfile() and name in ("postinst", "postrm"):
+                scripts[name] = item
+    return scripts
 
 
 def macho_architectures(data: bytes) -> set[tuple[int, int]]:
@@ -131,8 +151,45 @@ def main() -> int:
     control = read_control(members)
     if control.get("Package") != "com.lns.pogr.aacpdiag":
         raise ValueError(f"unexpected Package: {control.get('Package')!r}")
-    if control.get("Version") != "0.5.7~adts3diag6":
+    if control.get("Version") != "0.5.7~adts3diag7":
         raise ValueError(f"unexpected Version: {control.get('Version')!r}")
+
+    expected_scripts = {
+        "postinst": (
+            b"0.5.7~adts3diag7",
+            b"daemon_direct_fallback_begin",
+            b"/var/jb/usr/bin/aacpdiagd",
+        ),
+        "postrm": (
+            b"bootout",
+            b"killall",
+        ),
+    }
+    scripts = read_control_scripts(members)
+    missing_scripts = sorted(set(expected_scripts) - set(scripts))
+    if missing_scripts:
+        raise ValueError(f"missing control scripts: {missing_scripts}")
+    control_archive_name, control_archive = read_control_archive(members)
+    with control_archive:
+        for script_name, markers in expected_scripts.items():
+            script_info = scripts[script_name]
+            if script_info.mode & 0o111 == 0:
+                raise ValueError(f"{script_name} is not executable")
+            extracted = control_archive.extractfile(script_info)
+            if extracted is None:
+                raise ValueError(f"cannot read control script {script_name}")
+            data = extracted.read()
+            if b"\r" in data:
+                raise ValueError(f"{script_name} contains CR characters")
+            if not data.startswith(b"#!/bin/sh\n"):
+                raise ValueError(
+                    f"{script_name} does not start with a POSIX shell shebang"
+                )
+            missing_markers = [marker for marker in markers if marker not in data]
+            if missing_markers:
+                raise ValueError(
+                    f"{script_name} is missing markers: {missing_markers}"
+                )
 
     payload_name, archive = read_payload(members)
     files: dict[str, tarfile.TarInfo] = {}
@@ -247,17 +304,37 @@ def main() -> int:
     binary_markers = {
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiag.dylib": (
             b"source=aacp_ui",
-            b"0.5.7~adts3diag6",
+            b"0.5.7~adts3diag7",
         ),
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiagHelper.dylib": (
             b"source=helper",
-            b"0.5.7~adts3diag6",
+            b"0.5.7~adts3diag7",
         ),
         "usr/bin/aacpdiagd": (
             b"source=aacpdiagd",
-            b"0.5.7~adts3diag6",
+            b"0.5.7~adts3diag7",
         ),
     }
+    runtime_markers = {
+        "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiag.dylib": (
+            b"diag7_runtime_discovery",
+        ),
+        "Library/MobileSubstrate/DynamicLibraries/"
+        "PodsGrantAACPDiagHelper.dylib": (
+            b"diag7_runtime_discovery",
+        ),
+    }
+    for binary_name, markers in runtime_markers.items():
+        extracted = archive.extractfile(files[binary_name])
+        if extracted is None:
+            raise ValueError(f"cannot read {binary_name}")
+        data = extracted.read()
+        missing_markers = [marker for marker in markers if marker not in data]
+        if missing_markers:
+            raise ValueError(
+                f"{binary_name} is missing runtime markers: "
+                f"{missing_markers}"
+            )
     for binary_name, markers in binary_markers.items():
         extracted = archive.extractfile(files[binary_name])
         if extracted is None:
@@ -271,6 +348,7 @@ def main() -> int:
 
     print(
         f"package={package} payload={payload_name} files={len(files)} "
+        f"control={control_archive_name} scripts={','.join(sorted(scripts))} "
         f"architectures=arm64,arm64e package_version={control['Version']}"
     )
     return 0

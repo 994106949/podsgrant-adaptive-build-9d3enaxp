@@ -3,6 +3,22 @@
 #import <objc/runtime.h>
 #import <stdlib.h>
 
+static BOOL AAPDiagNativeTypeIsSupported(const char *type, BOOL allowVoid) {
+	if (!type) {
+		return NO;
+	}
+	while (*type && strchr("rnNoORV", *type)) {
+		type++;
+	}
+	if (!*type) {
+		return NO;
+	}
+	if (allowVoid && *type == 'v') {
+		return YES;
+	}
+	return strchr("@#:cCsSiIlLqQB*^?", *type) != NULL;
+}
+
 static NSArray<NSString *> *AAPDiagSelectorCandidates(void) {
 	return @[
 		@"listeningMode",
@@ -130,6 +146,198 @@ static NSArray<NSString *> *AAPDiagSelectorAvailability(id object) {
 		BOOL responds = [object respondsToSelector:selector];
 		NSString *marker = responds ? @"YES" : @"NO";
 		[result addObject:[NSString stringWithFormat:@"%@=%@", name, marker]];
+	}
+	return result;
+}
+
+static id AAPDiagInvokeObjectGetter(id target, NSString *name) {
+	if (!target || !name.length ||
+		![target respondsToSelector:NSSelectorFromString(name)]) {
+		return nil;
+	}
+	SEL selector = NSSelectorFromString(name);
+	NSMethodSignature *signature =
+		[target methodSignatureForSelector:selector];
+	if (!signature || signature.numberOfArguments != 2 ||
+		signature.methodReturnLength == 0 ||
+		signature.methodReturnType[0] != '@') {
+		return nil;
+	}
+	NSInvocation *invocation =
+		[NSInvocation invocationWithMethodSignature:signature];
+	invocation.target = target;
+	invocation.selector = selector;
+	@try {
+		[invocation invoke];
+	} @catch (__unused NSException *exception) {
+		return nil;
+	}
+	__unsafe_unretained id value = nil;
+	[invocation getReturnValue:&value];
+	return value;
+}
+
+static NSString *AAPDiagObjectAddress(id object, NSUInteger depth) {
+	if (!object || depth > 3) {
+		return nil;
+	}
+	for (NSString *name in @[
+		@"address",
+		@"bluetoothAddress",
+		@"deviceAddress",
+		@"accessoryAddress",
+		@"identifier",
+		@"btAddress",
+		@"btAddressString",
+		@"macAddress",
+	]) {
+		id value = AAPDiagInvokeObjectGetter(object, name);
+		if ([value isKindOfClass:[NSString class]]) {
+			NSString *normalized = AAPDiagNormalizeAddress(value);
+			if (normalized.length) {
+				return normalized;
+			}
+		}
+		if ([value isKindOfClass:[NSData class]] &&
+			[(NSData *)value length] == 6) {
+			const uint8_t *bytes = [(NSData *)value bytes];
+			return [NSString stringWithFormat:
+				@"%02X:%02X:%02X:%02X:%02X:%02X",
+				bytes[0], bytes[1], bytes[2],
+				bytes[3], bytes[4], bytes[5]];
+		}
+	}
+	for (NSString *name in @[
+		@"device",
+		@"bluetoothDevice",
+		@"btDevice",
+		@"accessory",
+		@"underlyingDevice",
+	]) {
+		id nested = AAPDiagInvokeObjectGetter(object, name);
+		if (nested && nested != object) {
+			NSString *address = AAPDiagObjectAddress(nested, depth + 1);
+			if (address.length) {
+				return address;
+			}
+		}
+	}
+	return nil;
+}
+
+static void AAPDiagFlattenCandidateValue(id value,
+	NSMutableArray *output,
+	NSUInteger depth) {
+	if (!value || depth > 2) {
+		return;
+	}
+	if ([value isKindOfClass:[NSArray class]] ||
+		[value isKindOfClass:[NSSet class]]) {
+		for (id item in value) {
+			AAPDiagFlattenCandidateValue(item, output, depth + 1);
+		}
+		return;
+	}
+	if ([value isKindOfClass:[NSDictionary class]]) {
+		for (id item in [(NSDictionary *)value allValues]) {
+			AAPDiagFlattenCandidateValue(item, output, depth + 1);
+		}
+		return;
+	}
+	[output addObject:value];
+}
+
+static void AAPDiagAddCandidateAndNestedObjects(id object,
+	NSMutableArray *output,
+	NSMutableSet<NSString *> *seen,
+	NSUInteger depth) {
+	if (!object || depth > 2) {
+		return;
+	}
+	NSString *key = [NSString stringWithFormat:@"%p", object];
+	if ([seen containsObject:key]) {
+		return;
+	}
+	[seen addObject:key];
+	[output addObject:object];
+
+	for (NSString *name in @[
+		@"device",
+		@"bluetoothDevice",
+		@"btDevice",
+		@"accessory",
+		@"underlyingDevice",
+	]) {
+		id nested = AAPDiagInvokeObjectGetter(object, name);
+		if (nested && nested != object) {
+			AAPDiagAddCandidateAndNestedObjects(
+				nested,
+				output,
+				seen,
+				depth + 1);
+		}
+	}
+}
+
+static NSArray<NSDictionary<NSString *, id> *> *
+AAPDiagSetterCandidates(id object) {
+	NSMutableArray<NSDictionary<NSString *, id> *> *result =
+		[NSMutableArray array];
+	NSMutableSet<NSString *> *seen = [NSMutableSet set];
+	Class cls = object ? object_getClass(object) : Nil;
+	for (NSUInteger depth = 0; cls && depth < 10;
+		depth++, cls = class_getSuperclass(cls)) {
+		unsigned int count = 0;
+		Method *methods = class_copyMethodList(cls, &count);
+		for (unsigned int index = 0; index < count; index++) {
+			Method method = methods[index];
+			NSString *name = NSStringFromSelector(method_getName(method));
+			NSString *lower = name.lowercaseString;
+			if (![lower hasPrefix:@"set"] ||
+				(![lower containsString:@"listen"] &&
+				 ![lower containsString:@"noise"] &&
+				 ![lower containsString:@"transparen"] &&
+				 ![lower containsString:@"adaptive"] &&
+				 ![lower containsString:@"hearing"] &&
+				 ![lower containsString:@"anc"])) {
+				continue;
+			}
+			if ([name isEqualToString:@"setListeningMode:"] ||
+				[name isEqualToString:@"setListeningModeConfigs:"] ||
+				[seen containsObject:name]) {
+				continue;
+			}
+			const char *types = method_getTypeEncoding(method);
+			NSMethodSignature *signature = nil;
+			@try {
+				signature = [NSMethodSignature
+					signatureWithObjCTypes:types];
+			} @catch (__unused NSException *exception) {
+				signature = nil;
+			}
+			if (!signature || signature.numberOfArguments != 3) {
+				continue;
+			}
+			const char *argumentType =
+				[signature getArgumentTypeAtIndex:2];
+			if (!AAPDiagNativeTypeIsSupported(argumentType, NO)) {
+				continue;
+			}
+			const char *returnType = signature.methodReturnType;
+			if (!AAPDiagNativeTypeIsSupported(returnType, YES)) {
+				continue;
+			}
+			[seen addObject:name];
+			[result addObject:@{
+				@"name": name,
+				@"types": [NSString stringWithUTF8String:types ?: ""] ?:
+					@"",
+				@"argument_type": [NSString
+					stringWithUTF8String:argumentType ?: ""] ?: @"",
+				@"class": NSStringFromClass(cls) ?: @"?",
+			}];
+		}
+		free(methods);
 	}
 	return result;
 }
@@ -507,15 +715,310 @@ NSDictionary<NSString *, id> *AAPDiagRunNativeTest(id device,
 		result[@"status"] = @"native_setter_missing";
 	} else if (!modeOK) {
 		result[@"status"] = @"native_setter_failed";
-	} else if (confirmed) {
-		result[@"status"] = @"local_getter_only";
 	} else {
-		result[@"status"] = @"native_getter_mismatch";
+		result[@"status"] = @"local_getter_only";
 	}
 	[trace addObject:[NSString stringWithFormat:
 		@"native_result status=%@ requested=%u final=%lld (getter is not device confirmation)",
 		result[@"status"],
 		mode,
 		last]];
+	return result;
+}
+
+static BOOL AAPDiagObjectAddressMatches(id object,
+	NSString *expectedAddress) {
+	NSString *expected = AAPDiagNormalizeAddress(expectedAddress);
+	NSString *actual = AAPDiagObjectAddress(object, 0);
+	if (!expected.length || !actual.length) {
+		return NO;
+	}
+	return [expected isEqualToString:actual];
+}
+
+NSArray *AAPDiagDiscoverDeviceCandidates(NSString *expectedAddress) {
+	NSMutableArray *all = [NSMutableArray array];
+	NSMutableSet<NSString *> *seen = [NSMutableSet set];
+	NSString *expected = AAPDiagNormalizeAddress(expectedAddress);
+	NSMutableArray *classCandidates = [NSMutableArray array];
+	for (NSString *className in @[
+		@"BTSDevice",
+		@"BTSDeviceClassic",
+		@"BluetoothDevice",
+	]) {
+		Class cls = objc_getClass(className.UTF8String);
+		if (cls) {
+			[classCandidates addObject:(id)cls];
+		}
+	}
+	for (id classObject in classCandidates) {
+		for (NSString *name in @[
+			@"pairedDevices",
+			@"connectedDevices",
+			@"devices",
+			@"allDevices",
+		]) {
+			SEL selector = NSSelectorFromString(name);
+			Class cls = (Class)classObject;
+			if (![cls respondsToSelector:selector]) {
+				continue;
+			}
+			NSMethodSignature *signature =
+				[cls methodSignatureForSelector:selector];
+			if (!signature || signature.numberOfArguments != 2 ||
+				signature.methodReturnLength == 0 ||
+				signature.methodReturnType[0] != '@') {
+				continue;
+			}
+			NSInvocation *invocation =
+				[NSInvocation invocationWithMethodSignature:signature];
+			invocation.target = classObject;
+			invocation.selector = selector;
+			@try {
+				[invocation invoke];
+				__unsafe_unretained id value = nil;
+				[invocation getReturnValue:&value];
+				AAPDiagFlattenCandidateValue(value, all, 0);
+			} @catch (__unused NSException *exception) {
+			}
+		}
+	}
+	Class managerClass = objc_getClass("BluetoothManager");
+	if (managerClass) {
+		id manager = nil;
+		@try {
+			manager = [managerClass sharedInstance];
+		} @catch (__unused NSException *exception) {
+			manager = nil;
+		}
+		if (!manager) {
+			@try {
+				manager = [managerClass defaultInstance];
+			} @catch (__unused NSException *exception) {
+				manager = nil;
+			}
+		}
+		AAPDiagAddCandidateAndNestedObjects(manager, all, seen, 0);
+		for (NSString *name in @[
+			@"pairedDevices",
+			@"connectedDevices",
+			@"devices",
+			@"allDevices",
+		]) {
+			id value = AAPDiagInvokeObjectGetter(manager, name);
+			AAPDiagFlattenCandidateValue(value, all, 0);
+		}
+		if (expected.length) {
+			SEL lookup = NSSelectorFromString(@"deviceForAddress:");
+			if (manager && [manager respondsToSelector:lookup]) {
+				NSMethodSignature *signature =
+					[manager methodSignatureForSelector:lookup];
+				if (signature && signature.numberOfArguments == 3 &&
+					signature.methodReturnLength > 0 &&
+					signature.methodReturnType[0] == '@') {
+					NSInvocation *invocation =
+						[NSInvocation invocationWithMethodSignature:signature];
+					invocation.target = manager;
+					invocation.selector = lookup;
+					NSString *argument = expected;
+					[invocation setArgument:&argument atIndex:2];
+					@try {
+						[invocation invoke];
+						__unsafe_unretained id value = nil;
+						[invocation getReturnValue:&value];
+						AAPDiagFlattenCandidateValue(value, all, 0);
+					} @catch (__unused NSException *exception) {
+					}
+				}
+			}
+		}
+	}
+
+	NSMutableSet<NSString *> *expandedSeen = [NSMutableSet set];
+	NSMutableArray *expanded = [NSMutableArray array];
+	for (id candidate in all) {
+		AAPDiagAddCandidateAndNestedObjects(
+			candidate,
+			expanded,
+			expandedSeen,
+			0);
+	}
+
+	NSMutableArray *matched = [NSMutableArray array];
+	NSMutableArray *unmatched = [NSMutableArray array];
+	for (id candidate in expanded) {
+		NSString *address = AAPDiagObjectAddress(candidate, 0);
+		if (expected.length && address.length &&
+			![expected isEqualToString:address]) {
+			continue;
+		}
+		[matched addObject:candidate];
+		if (!expected.length) {
+			[unmatched addObject:candidate];
+		}
+	}
+	if (expected.length) {
+		NSMutableArray *exact = [NSMutableArray array];
+		for (id candidate in matched) {
+			if (AAPDiagObjectAddressMatches(candidate, expected)) {
+				[exact addObject:candidate];
+			}
+		}
+		return exact;
+	}
+	return unmatched;
+}
+
+NSDictionary<NSString *, id> *AAPDiagRunNativeTestOnCandidates(
+	NSArray *candidates,
+	NSString *expectedAddress,
+	unsigned int mode) {
+	NSMutableArray<NSString *> *trace = [NSMutableArray array];
+	NSMutableDictionary<NSString *, id> *result =
+		[NSMutableDictionary dictionary];
+	result[@"status"] = @"native_setters_invoked_unconfirmed";
+	result[@"mode"] = @(mode);
+	result[@"expected_address"] =
+		AAPDiagNormalizeAddress(expectedAddress) ?: @"";
+	result[@"trace"] = trace;
+	result[@"timestamp"] = @([[NSDate date] timeIntervalSince1970]);
+
+	NSMutableArray *flattened = [NSMutableArray array];
+	NSMutableSet<NSString *> *seen = [NSMutableSet set];
+	for (id value in candidates ?: @[]) {
+		AAPDiagFlattenCandidateValue(value, flattened, 0);
+	}
+	NSMutableArray *unique = [NSMutableArray array];
+	for (id candidate in flattened) {
+		NSString *key = [NSString stringWithFormat:@"%p", candidate];
+		if ([seen containsObject:key]) {
+			continue;
+		}
+		[seen addObject:key];
+		[unique addObject:candidate];
+	}
+
+	NSMutableArray *matched = [NSMutableArray array];
+	NSString *expected = AAPDiagNormalizeAddress(expectedAddress);
+	for (id candidate in unique) {
+		NSString *address = AAPDiagObjectAddress(candidate, 0);
+		BOOL addressMatches = expected.length && address.length &&
+			[expected isEqualToString:address];
+		if (expected.length && !addressMatches) {
+			continue;
+		}
+		[matched addObject:candidate];
+	}
+	result[@"candidate_count"] = @(unique.count);
+	result[@"matched_count"] = @(matched.count);
+	[trace addObject:[NSString stringWithFormat:
+		@"candidate flatten=%lu unique=%lu matched=%lu expected=%@",
+		(unsigned long)flattened.count,
+		(unsigned long)unique.count,
+		(unsigned long)matched.count,
+		expected ?: @"any"]];
+	if (!matched.count) {
+		result[@"status"] = @"native_device_missing";
+		return result;
+	}
+
+	NSMutableArray<NSDictionary *> *records = [NSMutableArray array];
+		NSUInteger modeInvocationCount = 0;
+	for (id candidate in matched) {
+		NSMutableDictionary *record = [NSMutableDictionary dictionary];
+		NSString *className =
+			NSStringFromClass(object_getClass(candidate)) ?: @"?";
+		NSString *address = AAPDiagObjectAddress(candidate, 0) ?: @"";
+		record[@"class"] = className;
+		record[@"pointer"] = [NSString stringWithFormat:@"%p", candidate];
+		record[@"address"] = address;
+		record[@"inventory"] = AAPDiagClassInventory(candidate);
+		record[@"selectors"] = AAPDiagSelectorAvailability(candidate);
+		record[@"setters"] = AAPDiagSetterCandidates(candidate);
+		NSMutableArray<NSString *> *candidateTrace =
+			[NSMutableArray array];
+		AAPDiagLog(@"ui_candidate index=%lu class=%@ pointer=%p address=%@",
+			(unsigned long)[matched indexOfObjectIdenticalTo:candidate],
+			className,
+			candidate,
+			address);
+
+		NSString *configReturn = @"";
+		NSString *configError = nil;
+		BOOL configInvoked = AAPDiagInvokeSetter(
+			candidate,
+			NSSelectorFromString(@"setListeningModeConfigs:"),
+			0x0F,
+			&configReturn,
+			&configError);
+		[candidateTrace addObject:[NSString stringWithFormat:
+			@"setListeningModeConfigs:0x0F invoked=%d return=%@ error=%@",
+			configInvoked,
+			configReturn ?: @"",
+			configError ?: @"none"]];
+		NSString *modeReturn = @"";
+		NSString *modeError = nil;
+		BOOL modeInvoked = AAPDiagInvokeSetter(
+			candidate,
+			NSSelectorFromString(@"setListeningMode:"),
+			mode,
+			&modeReturn,
+			&modeError);
+		record[@"set_mode"] = @{
+			@"requested": @(mode),
+			@"invoked": @(modeInvoked),
+			@"return": modeReturn ?: @"",
+			@"error": modeError ?: @"",
+		};
+		[candidateTrace addObject:[NSString stringWithFormat:
+			@"setListeningMode:%u invoked=%d return=%@ error=%@",
+			mode,
+			modeInvoked,
+			modeReturn ?: @"",
+			modeError ?: @"none"]];
+		if (modeInvoked) {
+			modeInvocationCount++;
+		}
+
+		if (mode == AAPDiagModeAdaptive) {
+			NSString *adaptiveReturn = @"";
+			NSString *adaptiveError = nil;
+			BOOL adaptiveInvoked = AAPDiagInvokeSetter(
+				candidate,
+				NSSelectorFromString(
+					@"setAdaptiveTransparencyEnabled:"),
+				1,
+				&adaptiveReturn,
+				&adaptiveError);
+			record[@"set_adaptive_transparency"] = @{
+				@"invoked": @(adaptiveInvoked),
+				@"return": adaptiveReturn ?: @"",
+				@"error": adaptiveError ?: @"",
+			};
+			[candidateTrace addObject:[NSString stringWithFormat:
+				@"setAdaptiveTransparencyEnabled:YES invoked=%d "
+				@"return=%@ error=%@",
+				adaptiveInvoked,
+				adaptiveReturn ?: @"",
+				adaptiveError ?: @"none"]];
+		}
+		record[@"trace"] = candidateTrace;
+		[records addObject:record];
+		AAPDiagLog(@"ui_candidate_result class=%@ pointer=%p address=%@ "
+			@"trace=%@",
+			className,
+			candidate,
+			address,
+			candidateTrace);
+	}
+
+	result[@"devices"] = records;
+		result[@"setter_invocations"] = @(modeInvocationCount);
+		[trace addObject:[NSString stringWithFormat:
+			@"native_mode_setters invoked=%lu (no AACP reply captured here)",
+			(unsigned long)modeInvocationCount]];
+		if (!modeInvocationCount) {
+			result[@"status"] = @"native_setter_missing";
+		}
 	return result;
 }

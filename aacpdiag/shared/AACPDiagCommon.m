@@ -37,7 +37,7 @@ NSString *const AAPDiagDarwinNotification =
 	@"com.lns.pogr.aacpdiag.request";
 const char *const AAPDiagNotifyName =
 	"com.lns.pogr.aacpdiag.request.notify";
-NSString *const AAPDiagVersion = @"0.5.7~adts3diag6";
+NSString *const AAPDiagVersion = @"0.5.7~adts3diag7";
 
 static void AAPDiagAppendLine(NSString *path, NSString *message) {
 	NSDateFormatter *formatter = [[NSDateFormatter alloc] init];

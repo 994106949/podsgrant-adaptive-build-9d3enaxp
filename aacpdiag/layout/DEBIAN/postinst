@@ -3,10 +3,18 @@
 LOG=/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.log
 BOOT_LOG=/var/tmp/com.lns.pogr.aacpdiag/helper-boot.log
 TMP_BOOT_LOG=/tmp/com.lns.pogr.aacpdiag/helper-boot.log
-PACKAGE_VERSION=0.5.7~adts3diag6
+PACKAGE_VERSION=0.5.7~adts3diag7
 PLIST=/var/jb/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist
 DAEMON=/var/jb/usr/bin/aacpdiagd
 PACKAGE_PATH="${DPKG_ADMINDIR:-/var/lib/dpkg}/info/com.lns.pogr.aacpdiag.list"
+
+if [ ! -x "$DAEMON" ] && [ -x /usr/bin/aacpdiagd ]; then
+	DAEMON=/usr/bin/aacpdiagd
+fi
+if [ ! -f "$PLIST" ] &&
+	[ -f /Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist ]; then
+	PLIST=/Library/LaunchDaemons/com.lns.pogr.aacpdiagd.plist
+fi
 
 mkdir -p \
 	/var/mobile/Library/Preferences \
@@ -20,6 +28,35 @@ log_line() {
 	for target in "$LOG" "$BOOT_LOG" "$TMP_BOOT_LOG"; do
 		echo "$(date '+%Y-%m-%d %H:%M:%S.000') pid=$$ [postinst] $*" >> "$target"
 	done
+}
+
+daemon_ready_file() {
+	for candidate in \
+		/var/tmp/com.lns.pogr.aacpdiag/helper.plist \
+		/var/mobile/Library/Preferences/com.lns.pogr.aacpdiag.helper.plist \
+		/tmp/com.lns.pogr.aacpdiag/helper.plist
+	do
+		if [ -s "$candidate" ]; then
+			return 0
+		fi
+	done
+	return 1
+}
+
+wait_for_daemon() {
+	attempt=0
+	while [ "$attempt" -lt 10 ]; do
+		DAEMON_PID=$(pgrep -x aacpdiagd 2>/dev/null | head -n 1)
+		if [ -n "$DAEMON_PID" ]; then
+			return 0
+		fi
+		if daemon_ready_file; then
+			return 0
+		fi
+		attempt=$((attempt + 1))
+		sleep 1
+	done
+	return 1
 }
 
 log_line "install_begin version=$PACKAGE_VERSION package_list=$PACKAGE_PATH"
@@ -98,10 +135,27 @@ else
 fi
 
 DAEMON_PID=$(pgrep -x aacpdiagd 2>/dev/null | head -n 1)
-if [ -n "$DAEMON_PID" ]; then
-	log_line "daemon_process pid=$DAEMON_PID state=running"
+if [ -z "$DAEMON_PID" ] && [ -x "$DAEMON" ]; then
+	log_line "daemon_direct_fallback_begin executable=$DAEMON"
+	DAEMON_STDOUT=/var/tmp/com.lns.pogr.aacpdiag/daemon-stdout.log
+	DAEMON_STDERR=/var/tmp/com.lns.pogr.aacpdiag/daemon-stderr.log
+	if command -v nohup >/dev/null 2>&1; then
+		nohup "$DAEMON" >>"$DAEMON_STDOUT" 2>>"$DAEMON_STDERR" </dev/null &
+	else
+		"$DAEMON" >>"$DAEMON_STDOUT" 2>>"$DAEMON_STDERR" </dev/null &
+	fi
+	DIRECT_START_STATUS=$?
+	sleep 1
+	log_line "daemon_direct_fallback_status=$DIRECT_START_STATUS"
+elif [ -z "$DAEMON_PID" ]; then
+	log_line "daemon_direct_fallback_skipped reason=not_executable executable=$DAEMON"
+fi
+
+if wait_for_daemon; then
+	DAEMON_PID=$(pgrep -x aacpdiagd 2>/dev/null | head -n 1)
+	log_line "daemon_process pid=${DAEMON_PID:--} state=running"
 else
-	log_line "daemon_process pid=- state=not_running"
+	log_line "daemon_process pid=- state=not_running ready=0"
 fi
 
 killall -TERM Preferences 2>/dev/null || true
