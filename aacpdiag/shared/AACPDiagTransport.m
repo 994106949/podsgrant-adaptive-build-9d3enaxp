@@ -355,6 +355,34 @@ static NSDictionary<NSString *, id> *AAPDiagRunActiveDescriptorTransport(
 	}
 
 	[NSThread sleepForTimeInterval:0.20];
+	uint64_t configWaitStartedAt = AAPDiagTransportMonotonicMicroseconds();
+	NSArray<NSDictionary<NSString *, id> *> *configFrames = @[];
+	NSDictionary *configAck = nil;
+	NSUInteger configAckCount = 0;
+	NSDate *configDeadline = [NSDate dateWithTimeIntervalSinceNow:
+		(NSTimeInterval)AAP_CONFIG_WAIT_MS / 1000.0];
+	while ([configDeadline timeIntervalSinceNow] > 0) {
+		configFrames = AAPDiagCopyAACPRXFramesForDescriptor(
+			fd,
+			configWaitStartedAt);
+		configAck = AAPDiagFindSettingInFrames(
+			configFrames,
+			AAPDiagListeningConfigID,
+			0x0F,
+			&configAckCount);
+		if (configAck && [configAck[@"echo_matches"] boolValue]) {
+			break;
+		}
+		[NSThread sleepForTimeInterval:0.025];
+	}
+	BOOL configAcknowledged =
+		configAck && [configAck[@"echo_matches"] boolValue];
+	[trace addObject:[NSString stringWithFormat:
+		@"active_fd_config_wait ack=%d count=%lu frames=%lu",
+		configAcknowledged,
+		(unsigned long)configAckCount,
+		(unsigned long)configFrames.count]];
+
 	uint64_t modeSentAt = AAPDiagTransportMonotonicMicroseconds();
 	NSData *modeFrame = AAPDiagFrame(AAPDiagListeningModeID, (uint8_t)mode);
 	ssize_t modeSent = send(fd, modeFrame.bytes, modeFrame.length, 0);
@@ -402,12 +430,16 @@ static NSDictionary<NSString *, id> *AAPDiagRunActiveDescriptorTransport(
 		@"exact_match": @(exactMatch),
 		@"fallback_unique": @(fallbackUnique),
 		@"config_sent": @(configOK),
+		@"config_ack": configAck ?: @{},
+		@"config_acknowledged": @(configAcknowledged),
+		@"config_ack_count": @(configAckCount),
 		@"mode_sent": @(modeOK),
 		@"mode_ack": modeAck ?: @{},
 		@"mode_ack_count": @(modeAckCount),
-		@"rx_frames": frames,
+		@"rx_frames": [configFrames arrayByAddingObjectsFromArray:frames],
 		@"rx_packets": packets,
 		@"tx_confirmed": @(txConfirmed),
+		@"config_wait_started_us": @(configWaitStartedAt),
 		@"started_us": @(started),
 		@"mode_sent_us": @(modeSentAt),
 	};
@@ -611,6 +643,10 @@ NSDictionary<NSString *, id> *AAPDiagRunTransportTest(NSString *address,
 			@"active_fd_exact_match":
 				active[@"exact_match"] ?: @NO,
 			@"tx_confirmed": @(txConfirmed),
+			@"config_ack": active[@"config_ack"] ?: @{},
+			@"config_acknowledged":
+				active[@"config_acknowledged"] ?: @NO,
+			@"config_ack_count": active[@"config_ack_count"] ?: @0,
 			@"config_frame": AAPDiagHex(AAPDiagFrame(
 				AAPDiagListeningConfigID, 0x0F)),
 			@"mode_frame": AAPDiagHex(AAPDiagFrame(

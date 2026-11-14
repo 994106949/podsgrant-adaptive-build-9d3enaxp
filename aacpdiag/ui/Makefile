@@ -6,10 +6,8 @@ include $(THEOS)/makefiles/common.mk
 TWEAK_NAME = PodsGrantAACPDiag
 
 PodsGrantAACPDiag_FILES = Tweak.x \
-	../shared/AACPDiagCommon.m \
-	../shared/AACPDiagNative.m \
-	../shared/AACPDiagRuntimeHooks.m
+	../shared/AACPDiagCommon.m
 PodsGrantAACPDiag_CFLAGS = -fobjc-arc
-PodsGrantAACPDiag_FRAMEWORKS = Foundation UIKit CoreBluetooth
+PodsGrantAACPDiag_FRAMEWORKS = Foundation UIKit
 
 include $(THEOS_MAKE_PATH)/tweak.mk

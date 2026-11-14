@@ -15,8 +15,9 @@ MH_MAGIC_64 = 0xFEEDFACF
 MH_CIGAM_64 = 0xCFFAEDFE
 FAT_MAGIC = 0xCAFEBABE
 FAT_MAGIC_64 = 0xCAFEBABF
-PACKAGE_VERSION = "0.5.8~adts3diag10"
-DIAGNOSTIC_MARKER = b"diag10_active_aacp_fd_reuse"
+PACKAGE_VERSION = "0.6.0~adts3final"
+UI_SAFE_MODE_MARKER = b"ui_runtime_hooks_disabled_safe_mode"
+HELPER_SAFE_MODE_MARKER = b"adts3final_socket_hooks_only"
 
 
 def read_ar(path: pathlib.Path) -> dict[str, bytes]:
@@ -336,19 +337,21 @@ def main() -> int:
             PACKAGE_VERSION.encode("ascii"),
         ),
     }
-    runtime_markers = {
+    safe_mode_markers = {
         "Library/MobileSubstrate/DynamicLibraries/PodsGrantAACPDiag.dylib": (
-            DIAGNOSTIC_MARKER,
-            b"Active FD Sent / Unconfirmed",
+            UI_SAFE_MODE_MARKER,
+            b"native_skipped_safe_mode",
         ),
         "Library/MobileSubstrate/DynamicLibraries/"
         "PodsGrantAACPDiagHelper.dylib": (
-            DIAGNOSTIC_MARKER,
-            b"active_aacp_fd_tx_unconfirmed",
-            b"active_aacp_fd_tx_failed",
+            HELPER_SAFE_MODE_MARKER,
         ),
     }
-    for binary_name, markers in runtime_markers.items():
+    forbidden_ui_markers = (
+        b"diag10_active_aacp_fd_reuse",
+        b"phase=runtime_hooks_begin",
+    )
+    for binary_name, markers in safe_mode_markers.items():
         extracted = archive.extractfile(files[binary_name])
         if extracted is None:
             raise ValueError(f"cannot read {binary_name}")
@@ -356,9 +359,18 @@ def main() -> int:
         missing_markers = [marker for marker in markers if marker not in data]
         if missing_markers:
             raise ValueError(
-                f"{binary_name} is missing runtime markers: "
+                f"{binary_name} is missing safe-mode markers: "
                 f"{missing_markers}"
             )
+        if binary_name.endswith("PodsGrantAACPDiag.dylib"):
+            stale_markers = [
+                marker for marker in forbidden_ui_markers if marker in data
+            ]
+            if stale_markers:
+                raise ValueError(
+                    f"{binary_name} still contains unsafe runtime markers: "
+                    f"{stale_markers}"
+                )
     for binary_name, markers in binary_markers.items():
         extracted = archive.extractfile(files[binary_name])
         if extracted is None:

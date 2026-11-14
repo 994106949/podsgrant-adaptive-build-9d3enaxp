@@ -10,7 +10,7 @@ PodsGrantAACPDiagHelper_FILES = Tweak.x \
 	../shared/AACPDiagNative.m \
 	../shared/AACPDiagRuntimeHooks.m \
 	../shared/AACPDiagTransport.m
-PodsGrantAACPDiagHelper_CFLAGS = -fobjc-arc
+PodsGrantAACPDiagHelper_CFLAGS = -fobjc-arc -DAACPDIAG_TRANSPORT_SAFE_MODE=1
 PodsGrantAACPDiagHelper_FRAMEWORKS = Foundation
 
 include $(THEOS_MAKE_PATH)/tweak.mk

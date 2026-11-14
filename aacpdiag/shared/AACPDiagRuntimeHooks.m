@@ -18,6 +18,10 @@
 #define AAP_DIAG_TRACKED_FDS 64
 #define AAP_DIAG_HOOK_RECORDS 512
 
+#ifndef AACPDIAG_TRANSPORT_SAFE_MODE
+#define AACPDIAG_TRANSPORT_SAFE_MODE 0
+#endif
+
 typedef int (*AAPDiagSocketFunction)(int, int, int);
 typedef int (*AAPDiagConnectFunction)(int, const struct sockaddr *, socklen_t);
 typedef ssize_t (*AAPDiagSendFunction)(int, const void *, size_t, int);
@@ -1162,8 +1166,12 @@ void AAPDiagInstallRuntimeHooks(void) {
 		AAPDiagSocketLogQueue = dispatch_queue_create(
 			"com.lns.pogr.aacpdiag.socket-log",
 			DISPATCH_QUEUE_SERIAL);
+#if AACPDIAG_TRANSPORT_SAFE_MODE
+		AAPDiagLog(@"diag_marker phase=runtime_hooks_safe_mode");
+#else
 		AAPDiagLog(@"diag_marker phase=runtime_hooks_begin");
 		AAPDiagLoadBluetoothFrameworks();
+#endif
 		AAPDiagHookFunction("socket",
 			(void *)AAPDiagSocketHook,
 			(void **)&AAPDiagOriginalSocket);
@@ -1186,6 +1194,7 @@ void AAPDiagInstallRuntimeHooks(void) {
 			(void *)AAPDiagCloseHook,
 			(void **)&AAPDiagOriginalClose);
 
+#if !AACPDIAG_TRANSPORT_SAFE_MODE
 		AAPDiagInstallClassHooksOnce();
 		for (NSNumber *delay in @[@1, @3, @10]) {
 			dispatch_after(
@@ -1198,5 +1207,9 @@ void AAPDiagInstallRuntimeHooks(void) {
 		}
 		AAPDiagLog(@"diag_marker phase=runtime_hooks_installed "
 			@"marker=diag10_active_aacp_fd_reuse");
+#else
+		AAPDiagLog(@"diag_marker phase=runtime_hooks_installed "
+			@"marker=adts3final_socket_hooks_only");
+#endif
 	});
 }
