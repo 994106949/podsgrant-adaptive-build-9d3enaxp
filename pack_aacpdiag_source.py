@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import pathlib
 import tarfile
 
@@ -25,7 +26,11 @@ def main() -> int:
     )
     with tarfile.open(ARCHIVE, "w:gz") as archive:
         for path in files:
-            archive.add(path, arcname=path.relative_to(ROOT).as_posix())
+            arcname = path.relative_to(ROOT).as_posix()
+            info = archive.gettarinfo(str(path), arcname=arcname)
+            data = path.read_bytes().replace(b"\r\n", b"\n")
+            info.size = len(data)
+            archive.addfile(info, io.BytesIO(data))
 
     required = {
         "aacpdiag/control",
@@ -50,12 +55,19 @@ def main() -> int:
     }
     with tarfile.open(ARCHIVE, "r:gz") as archive:
         names = set(archive.getnames())
+        for name in names:
+            member = archive.extractfile(name)
+            if member is not None and b"\r" in member.read():
+                raise SystemExit(f"packed file contains CR characters: {name}")
         control = archive.extractfile("aacpdiag/control")
         if control is None:
             raise SystemExit("packed control file is missing")
+        control_data = control.read()
+        if b"\r" in control_data:
+            raise SystemExit("packed control file contains CR characters")
         version = [
             line
-            for line in control.read().decode("utf-8").splitlines()
+            for line in control_data.decode("utf-8").splitlines()
             if line.startswith("Version: ")
         ]
         packed_scripts = {}
