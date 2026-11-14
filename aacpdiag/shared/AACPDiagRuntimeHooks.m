@@ -39,7 +39,6 @@ typedef struct {
 static AAPDiagSocketState AAPDiagSockets[AAP_DIAG_TRACKED_FDS];
 static pthread_mutex_t AAPDiagSocketLock = PTHREAD_MUTEX_INITIALIZER;
 static dispatch_queue_t AAPDiagSocketLogQueue;
-static __thread int AAPDiagSocketHookDepth;
 
 typedef uintptr_t (*AAPDiagGenericMethodOriginal)(id,
 	SEL,
